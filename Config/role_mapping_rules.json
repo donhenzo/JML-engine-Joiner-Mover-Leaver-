@@ -1,0 +1,241 @@
+{
+  "rules": [
+    {
+      "id": "RULE-ENG-001",
+      "description": "Engineering — all staff baseline",
+      "priority": 100,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Engineering" }
+      },
+      "entitlements": {
+        "groups": ["fa63d51b-f81c-4b2b-a658-31f6befe5a49"],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-ENG-002",
+      "description": "Engineering — Software Engineer role",
+      "priority": 200,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Engineering" },
+        "job_title":  { "operator": "exact", "value": "Software Engineer" }
+      },
+      "entitlements": {
+        "groups": ["956720f7-8f66-4987-bf47-4998c839ba00"],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-ENG-003",
+      "description": "Engineering — Senior Software Engineer role",
+      "priority": 200,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Engineering" },
+        "job_title":  { "operator": "exact", "value": "Senior Software Engineer" }
+      },
+      "entitlements": {
+        "groups": ["956720f7-8f66-4987-bf47-4998c839ba00"],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-SALES-001",
+      "description": "Sales — all staff baseline",
+      "priority": 100,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Sales" }
+      },
+      "entitlements": {
+        "groups": ["111fdfb6-1709-4987-8818-b66417d89f91"],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-SALES-002",
+      "description": "Sales — Sales Manager role",
+      "priority": 200,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Sales" },
+        "job_title":  { "operator": "exact", "value": "Sales Manager" }
+      },
+      "entitlements": {
+        "groups": ["0c67c63b-a6e2-4bf6-b4a0-3a860384cf08"],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-HR-001",
+      "description": "Human Resources — all staff baseline",
+      "priority": 100,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Human Resources" }
+      },
+      "entitlements": {
+        "groups": ["3005476d-7190-480a-a23f-ab65f0d2061e"],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-HR-002",
+      "description": "Human Resources — HR Advisor role",
+      "priority": 200,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Human Resources" },
+        "job_title":  { "operator": "exact", "value": "HR Advisor" }
+      },
+      "entitlements": {
+        "groups": ["999749f5-e34a-47ce-be6e-22bba169fce0"],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-FIN-001",
+      "description": "Finance — all staff baseline",
+      "priority": 100,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Finance" }
+      },
+      "entitlements": {
+        "groups": ["8410d4d1-fe60-413f-9d2d-6d33200c6517"],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-FIN-002",
+      "description": "Finance — Finance Analyst role",
+      "priority": 200,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Finance" },
+        "job_title":  { "operator": "exact", "value": "Finance Analyst" }
+      },
+      "entitlements": {
+        "groups": ["5d33063f-53da-4d01-a87c-1d5f460b840b"],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-EMP-CONTRACTOR",
+      "description": "Employment type — Contractor gets contractor group for their department",
+      "priority": 300,
+      "conditions": {
+        "department":       { "operator": "exact", "value": "Engineering" },
+        "employment_type":  { "operator": "exact", "value": "Contractor" }
+      },
+      "entitlements": {
+        "groups": ["27061e09-c0a4-4cd6-91b3-ddb7714a37bd"],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-EMP-CONTRACTOR-HR",
+      "description": "Employment type — HR Contractor",
+      "priority": 300,
+      "conditions": {
+        "department":      { "operator": "exact", "value": "Human Resources" },
+        "employment_type": { "operator": "exact", "value": "Contractor" }
+      },
+      "entitlements": {
+        "groups": ["889ab9db-381e-4bc3-a222-fad441d4cbe0"],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-EMP-CONTRACTOR-IT",
+      "description": "Employment type — IT Contractor",
+      "priority": 300,
+      "conditions": {
+        "department":      { "operator": "exact", "value": "Information Technology" },
+        "employment_type": { "operator": "exact", "value": "Contractor" }
+      },
+      "entitlements": {
+        "groups": ["1d856a92-5b08-4527-8a17-83aca9f97af1"],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-CA-EMPLOYEE",
+      "description": "Conditional access — standard employees",
+      "priority": 400,
+      "conditions": {
+        "employment_type": { "operator": "exact", "value": "Employee" }
+      },
+      "entitlements": {
+        "groups": ["3e67ae85-f761-46ce-b958-54ec38625736"],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-CA-CONTRACTOR",
+      "description": "Conditional access — contractors get restricted policy",
+      "priority": 400,
+      "conditions": {
+        "employment_type": { "operator": "exact", "value": "Contractor" }
+      },
+      "entitlements": {
+        "groups": ["081cf46b-806b-449f-a838-98cc0433b5d1"],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-LIC-E3-ENG",
+      "description": "Licensing — M365 E3 for Engineering",
+      "priority": 500,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Engineering" }
+      },
+      "entitlements": {
+        "groups": ["d18f0b08-1ab6-462b-95ff-707c88cc7e0b"],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-LIC-E3-SALES",
+      "description": "Licensing — M365 E3 for Sales",
+      "priority": 500,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Sales" }
+      },
+      "entitlements": {
+        "groups": ["d18f0b08-1ab6-462b-95ff-707c88cc7e0b"],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-LIC-E3-HR",
+      "description": "Licensing — M365 E3 for Human Resources",
+      "priority": 500,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Human Resources" }
+      },
+      "entitlements": {
+        "groups": ["d18f0b08-1ab6-462b-95ff-707c88cc7e0b"],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-LIC-E3-FIN",
+      "description": "Licensing — M365 E3 for Finance",
+      "priority": 500,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Finance" }
+      },
+      "entitlements": {
+        "groups": ["d18f0b08-1ab6-462b-95ff-707c88cc7e0b"],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-LIC-FIN-ADDON",
+      "description": "Licensing — Finance addon for Finance department",
+      "priority": 600,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Finance" }
+      },
+      "entitlements": {
+        "groups": ["ddfd7df2-a436-4f44-b8df-f90b95189958"],
+        "rbac_roles": []
+      }
+    }
+  ]
+}
+

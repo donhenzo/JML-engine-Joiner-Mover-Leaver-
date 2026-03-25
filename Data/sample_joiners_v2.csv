@@ -1,0 +1,6 @@
+EmployeeId,UPN,DisplayName,Department,JobTitle,StartDate,EmploymentType,Action,ManagerId,Location,RetainRoles,RetainList
+E101,james.wright@josephonyenakuchigmail.onmicrosoft.com,James Wright,Engineering,Software Engineer,2026-05-01,Employee,Joiner,E099,London,false,
+E102,sarah.chen@josephonyenakuchigmail.onmicrosoft.com,Sarah Chen,Sales,Sales Manager,2026-05-01,Employee,Joiner,E098,London,false,
+E103,michael.obi@josephonyenakuchigmail.onmicrosoft.com,Michael Obi,Finance,Finance Analyst,2026-05-01,Employee,Joiner,E097,London,false,
+E104,priya.patel@josephonyenakuchigmail.onmicrosoft.com,Priya Patel,Engineering,Senior Software Engineer,2026-05-01,Contractor,Joiner,E099,London,false,
+E105,tom.baker@josephonyenakuchigmail.onmicrosoft.com,Tom Baker,Human Resources,HR Advisor,2026-05-01,Employee,Joiner,E096,London,false,

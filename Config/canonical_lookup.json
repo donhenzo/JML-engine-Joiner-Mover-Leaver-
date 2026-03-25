@@ -1,0 +1,58 @@
+{
+  "department": {
+    "engineering": "Engineering",
+    "eng": "Engineering",
+    "software engineering": "Engineering",
+    "sales": "Sales",
+    "sales team": "Sales",
+    "hr": "Human Resources",
+    "human resources": "Human Resources",
+    "people": "Human Resources",
+    "finance": "Finance",
+    "it": "Information Technology",
+    "information technology": "Information Technology",
+    "operations": "Operations",
+    "ops": "Operations"
+  },
+  "job_title": {
+    "software engineer": "Software Engineer",
+    "swe": "Software Engineer",
+    "senior software engineer": "Senior Software Engineer",
+    "senior swe": "Senior Software Engineer",
+    "staff engineer": "Staff Engineer",
+    "sales manager": "Sales Manager",
+    "sales mgr": "Sales Manager",
+    "account executive": "Account Executive",
+    "ae": "Account Executive",
+    "hr advisor": "HR Advisor",
+    "hr business partner": "HR Business Partner",
+    "hrbp": "HR Business Partner",
+    "finance analyst": "Finance Analyst",
+    "it support analyst": "IT Support Analyst",
+    "it analyst": "IT Support Analyst",
+    "operations manager": "Operations Manager",
+    "ops manager": "Operations Manager",
+    "engineering manager": "Engineering Manager",
+    "eng manager": "Engineering Manager"
+  },
+  "employment_type": {
+    "employee": "Employee",
+    "contractor": "Contractor",
+    "guest": "Guest"
+  },
+  "action": {
+    "joiner": "Joiner",
+    "mover": "Mover",
+    "leaver": "Leaver"
+  },
+  "location": {
+    "lon": "London",
+    "london": "London",
+    "nyc": "New York",
+    "new york": "New York",
+    "ams": "Amsterdam",
+    "amsterdam": "Amsterdam",
+    "syd": "Sydney",
+    "sydney": "Sydney"
+  }
+}
