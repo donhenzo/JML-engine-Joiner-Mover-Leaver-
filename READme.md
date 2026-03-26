@@ -172,8 +172,8 @@ Audit Report written (JSON, per identity)
 ## Key Engineering Decisions
 
 ### Policy Rules Engine — Not a Static Lookup Table
-
-Entitlements are resolved by evaluating externally loaded rule objects against the canonical identity payload. `mapping_resolver.py` evaluates all matching rules and unions the resulting entitlements. Adding a new role mapping is a JSON edit — no redeployment.
+ 
+Entitlements are resolved by evaluating externally loaded rule objects against the canonical identity payload. `mapping_resolver.py` evaluates all matching rules and unions the resulting entitlements. Adding a new role mapping is an edit to `role_mapping_rules.json` — no redeployment.
 
 ```json
 {
@@ -222,11 +222,16 @@ The transition `Received → Held` directly is not permitted and raises at runti
 ## Repository Structure
 
 ```
-JML-Engine/
+ML-Engine/
 │
 ├── Functions/
-│   └── joiner_http/
-│       └── __init__.py          # Azure Function HTTP trigger, run_pipeline()
+│   ├── joiner_http/
+│   │   └── __init__.py          # Azure Function HTTP trigger, run_pipeline()
+│   │
+│   └── Event_store/
+│       ├── __init__.py          # Python package
+│       ├── event_store.py       # Azure Table Storage, claim_event(), lock management
+│       └── conflict_queue.py    # Conflicting event queue management
 │
 ├── Ingestion/
 │   ├── csv_parser.py            # CSV ingestion and structural validation
@@ -237,23 +242,31 @@ JML-Engine/
 │   └── normalizer.py            # Resolves raw field values to canonical values
 │
 ├── Mapping/
-│   ├── mapping_loader.py        # Loads Rules.json from Azure Storage
+│   ├── __init__.py              # Python package
+│   ├── mapping_loader.py        # Loads role_mapping_rules.json from Azure Storage
 │   └── mapping_resolver.py      # Evaluates rules against identity payload
+│
+├── Provisioning/
+│   ├── __init__.py              # Python package
+│   ├── graph_client.py          # Microsoft Graph API client
+│   └── provisioner.py           # Entra ID user, group, and RBAC provisioning
+│
+├── Validation/
+│   └── validation_gate.py       # Pre- and post-provision validation gate
 │
 ├── Hold_queue/
 │   ├── models.py                # HoldStatus enum, HoldRecord dataclass
-│   └── queue_manager.py         # HoldQueueManager, state machine transitions
+│   ├── queue_manager.py         # HoldQueueManager, state machine transitions
+│   └── azure_table_hold_queue_store.py  # Azure Table Storage hold queue backend
 │
 ├── Audit/
 │   ├── models.py                # DecisionReport, ActionRecord, status enums
-│   └── report_writer.py         # Writes per-identity JSON audit reports
-│
-├── EventStore/
-│   └── event_store.py           # Azure Table Storage, claim_event(), lock management
+│   ├── report_writer.py         # Writes per-identity JSON audit reports
+│   └── run_summary_writer.py    # Writes per-run summary report
 │
 ├── config/
-│   ├── canonical_lookup.json    # Canonical field value mappings
-│   └── Rules.json               # Entitlement mapping rules (v3.0.0, 25 rules)
+│   ├── canonical_lookup.json        # Canonical field value mappings
+│   └── role_mapping_rules.json      # Entitlement mapping rules (v3.0.0, 25 rules)
 │
 ├── scripts/
 │   └── run_local.py             # Local pipeline runner (--output reports)
