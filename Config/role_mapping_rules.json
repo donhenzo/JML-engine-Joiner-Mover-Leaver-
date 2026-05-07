@@ -225,17 +225,18 @@
       }
     },
     {
-      "id": "RULE-LIC-FIN-ADDON",
-      "description": "Licensing — Finance addon for Finance department",
-      "priority": 600,
-      "conditions": {
-        "department": { "operator": "exact", "value": "Finance" }
-      },
-      "entitlements": {
-        "groups": ["ddfd7df2-a436-4f44-b8df-f90b95189958"],
-        "rbac_roles": []
-      }
-    }
+  "id": "RULE-ENG-MANAGER",
+  "description": "Engineering Manager — all employment types — Manager group",
+  "priority": 200,
+  "conditions": {
+    "department": { "operator": "exact", "value": "Engineering" },
+    "job_title":  { "operator": "exact", "value": "Engineering Manager" }
+  },
+  "entitlements": {
+    "groups": ["b7bfed9d-4531-4891-8347-1fed3c2f8d36"],
+    "rbac_roles": []
+  }
+}
   ]
 }
 

@@ -33,12 +33,19 @@
     "operations manager": "Operations Manager",
     "ops manager": "Operations Manager",
     "engineering manager": "Engineering Manager",
-    "eng manager": "Engineering Manager"
+    "eng manager": "Engineering Manager",
+    "finance manager": "Finance Manager",
+    "hr manager": "HR Manager",
+    "it manager": "IT Manager",
+    "operations director": "Operations Director",
+    "security hod" : "secuirty HOD",
+    "head of finance":     "Head of Finance"
   },
   "employment_type": {
     "employee": "Employee",
     "contractor": "Contractor",
-    "guest": "Guest"
+    "guest": "Guest",
+    "intern": "Intern"
   },
   "action": {
     "joiner": "Joiner",

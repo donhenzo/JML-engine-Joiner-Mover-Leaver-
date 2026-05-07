@@ -237,7 +237,6 @@ def pre_provision_validate(payload: IdentityPayload) -> ValidationResult:
 
     return result
 
-
 def post_provision_validate(entra_object_id: str, employee_id: str = "") -> ValidationResult:
     """
     Validate a provisioned Entra ID object against expected state.
@@ -254,8 +253,8 @@ def post_provision_validate(entra_object_id: str, employee_id: str = "") -> Vali
     employee_id is only used for log context — it is not sent to the engine.
     """
     body = {
-        "mode":         "PostProvision",
-        "targetUserId": entra_object_id  # Engine resolves identity from this Object ID
+        "mode": "PostProvision",
+        "targetUserId": entra_object_id
     }
 
     logger.info(
@@ -266,6 +265,11 @@ def post_provision_validate(entra_object_id: str, employee_id: str = "") -> Vali
         body=body,
         timeout=POST_PROVISION_TIMEOUT_SECONDS,
         mode="PostProvision"
+    )
+
+    # Log raw response from validation engine
+    logger.info(
+        f"Post-provision raw response — object_id={entra_object_id}: {result.raw_response}"
     )
 
     if result.passed:

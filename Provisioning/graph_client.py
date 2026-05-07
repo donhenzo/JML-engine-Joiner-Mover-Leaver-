@@ -207,12 +207,14 @@ class JmlGraphClient:
             user.department          = payload.department
             user.employee_id         = payload.employee_id
             user.usage_location      = "GB"  # Required for M365 license assignment
-
+            user.employee_type        = payload.employment_type.value #
             password_profile                                  = PasswordProfile()
             password_profile.password                         = temp_password
             password_profile.force_change_password_next_sign_in = True
             user.password_profile                             = password_profile
-
+             # Without this, Get-UserSnapshot returns null EmployeeType and
+             # ENT-001/ENT-002 cannot evaluate group membership against policy.
+            user.employee_type        = payload.employment_type.value
             created = self._run(self._client.users.post(user))
 
             # Guard against a silent Graph API failure — the SDK can return None
