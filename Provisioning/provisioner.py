@@ -42,6 +42,9 @@ from Provisioning.graph_client import (
     GraphClientError,
     UserNotFoundError,
 )
+from Provisioning.pim_client import assign_pim_group_eligibility, PimEligibilityResult
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +133,21 @@ def provision_joiner(
 
     if not rbac_ok:
         return result
+
+    # Step 5 — PIM group eligibility assignment (Phase 2)
+    # Only runs if the mapping rules resolved pimGroups for this identity.
+    # Users with no pimGroups entries skip this step cleanly.
+    if entitlements.pim_groups:
+        pim_ok = _assign_pim_eligibility(
+            user_id=     entra_id,
+            employee_id= payload.employee_id,
+            pim_groups=  entitlements.pim_groups,
+            report=      report,
+            graph_client=graph_client,
+            result=      result,
+        )
+        if not pim_ok:
+            return result
 
     result.succeeded = True
     logger.info(
@@ -413,6 +431,75 @@ def _assign_rbac_roles(
             result.failure_detail = str(e)
             logger.error(
                 f"RBAC assignment failed — employee={employee_id}, role={role_id}: {e}"
+            )
+            return False
+
+    return True
+
+
+def _assign_pim_eligibility(
+    user_id:      str,
+    employee_id:  str,
+    pim_groups:   list,
+    report:       DecisionReport,
+    graph_client: JmlGraphClient,
+    result:       ProvisioningResult,
+) -> bool:
+    """
+    Assign eligible group membership for all PIM groups resolved for this identity.
+
+    Called from provision_joiner() after RBAC assignment.
+    Each PIM group is independent — a failure on one stops the run and
+    marks the event Failed with failure_step=PimEligibilityAssignment.
+
+    Returns True if all PIM eligibility assignments succeeded or already existed.
+    Returns False on first failure — result is populated before returning.
+
+    Partial failure behaviour matches the group and RBAC steps:
+    better to surface a clear failure than silently continue.
+    """
+    for pim_group in pim_groups:
+        pim_result = assign_pim_group_eligibility(
+            graph_client=  graph_client,
+            user_id=       user_id,
+            group_id=      pim_group.group_id,
+            display_name=  pim_group.display_name,
+            eligible_role= pim_group.eligible_role,
+            justification= pim_group.justification,
+            duration_hours=pim_group.duration_hours,
+        )
+
+        if pim_result.succeeded:
+            detail = (
+                f"group={pim_group.display_name} — "
+                f"eligible for {pim_group.eligible_role}"
+            )
+            if pim_result.already_existed:
+                detail += " (already existed — retry)"
+            report.add_action(
+                action="PimEligibilityAssigned",
+                detail=detail,
+                succeeded=True,
+            )
+            logger.info(
+                f"PIM eligibility assigned — employee={employee_id}, "
+                f"group={pim_group.display_name}, role={pim_group.eligible_role}"
+            )
+        else:
+            report.add_action(
+                action="PimEligibilityFailed",
+                detail=(
+                    f"group={pim_group.display_name} — "
+                    f"eligible for {pim_group.eligible_role} — "
+                    f"error: {pim_result.error}"
+                ),
+                succeeded=False,
+            )
+            result.failure_step   = "PimEligibilityAssignment"
+            result.failure_detail = pim_result.error
+            logger.error(
+                f"PIM eligibility failed — employee={employee_id}, "
+                f"group={pim_group.display_name}, error={pim_result.error}"
             )
             return False
 

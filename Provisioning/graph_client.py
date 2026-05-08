@@ -67,23 +67,13 @@ class UserNotFoundError(GraphClientError):
     pass
 
 
-def build_graph_client() -> GraphServiceClient:
+def build_graph_client() -> tuple:
     """
-    Build and return an authenticated GraphServiceClient.
+    Build and return an authenticated GraphServiceClient and credential.
 
-    This is the only place in the codebase that knows how Graph auth works.
-    Keeping it here means switching from client secret to Managed Identity
-    (Block G) only requires changing this function — nothing in JmlGraphClient
-    or the provisioner needs to change.
-
-    For local dev, credentials are read from environment variables set in
-    local.settings.json:
-        AZURE_TENANT_ID     — Entra ID tenant ID
-        AZURE_CLIENT_ID     — app registration client ID
-        AZURE_CLIENT_SECRET — app registration client secret
-
-    Credentials are never stored after the credential object is built —
-    the SDK handles token acquisition and refresh from that point on.
+    Returns (GraphServiceClient, ClientSecretCredential) so the credential
+    can be reused for direct HTTP calls that the SDK does not natively support,
+    such as the PIM eligibility schedule endpoint.
     """
     tenant_id     = os.environ.get("AZURE_TENANT_ID", "")
     client_id     = os.environ.get("AZURE_CLIENT_ID", "")
@@ -102,7 +92,7 @@ def build_graph_client() -> GraphServiceClient:
         client_secret=client_secret
     )
 
-    return GraphServiceClient(credentials=credential)
+    return GraphServiceClient(credentials=credential), credential
 
 
 class JmlGraphClient:
@@ -121,8 +111,9 @@ class JmlGraphClient:
         client = JmlGraphClient(build_graph_client())
     """
 
-    def __init__(self, graph_client: GraphServiceClient) -> None:
-        self._client = graph_client
+    def __init__(self, graph_client: GraphServiceClient, credential=None) -> None:
+        self._client     = graph_client
+        self._credential = credential  # stored for direct HTTP calls needing a bearer token
 
     def _run(self, coroutine):
         """
@@ -381,6 +372,98 @@ class JmlGraphClient:
 
         except Exception as e:
             raise GraphClientError(f"create_rbac_assignment failed — user={user_id}: {e}")
+
+    def assign_pim_group_eligibility(
+        self,
+        user_id:       str,
+        group_id:      str,
+        justification: str,
+    ) -> dict:
+        """
+        Add a user as an eligible member of a PIM-enabled security group.
+
+        Uses the Graph privilegedAccess group eligibility API (Entra ID P2 required).
+        The group must already have an eligible Entra role assignment configured
+        in PIM — this method only creates the user's eligible membership.
+
+        Returns a dict with schedule_id on success.
+        Raises GraphClientError on failure.
+        Treats 409 Conflict as success — eligibility already exists (idempotent).
+
+        Inputs:
+            user_id       — Entra object ID of the user being provisioned
+            group_id      — object ID of the role-assignable PIM group
+            justification — business reason written to the eligibility record
+        """
+        import json as _json
+
+        endpoint = (
+            "https://graph.microsoft.com/v1.0"
+            "/identityGovernance/privilegedAccess/group/eligibilityScheduleRequests"
+        )
+
+        body = {
+            "accessId":    "member",
+            "principalId": user_id,
+            "groupId":     group_id,
+            "action":      "adminAssign",
+            "scheduleInfo": {
+                "startDateTime": None,
+                "expiration": {
+                    "type": "noExpiration"
+                }
+            },
+            "justification": justification
+        }
+
+        try:
+            import httpx
+            if self._credential is None:
+                raise GraphClientError(
+                    "No credential available for PIM HTTP call. "
+                    "Ensure JmlGraphClient is constructed via build_graph_client()."
+                )
+            token = self._credential.get_token("https://graph.microsoft.com/.default")
+
+            response = httpx.post(
+                endpoint,
+                headers={
+                    "Authorization": f"Bearer {token.token}",
+                    "Content-Type":  "application/json",
+                },
+                json=body,
+                timeout=30,
+            )
+
+            if response.status_code == 409:
+                logger.info(
+                    f"PIM eligibility already exists (idempotent) — "
+                    f"user={user_id}, group={group_id}"
+                )
+                return {"schedule_id": "", "already_existed": True}
+
+            if response.status_code not in (200, 201):
+                raise GraphClientError(
+                    f"PIM eligibility request failed — "
+                    f"status={response.status_code}, body={response.text[:300]}"
+                )
+
+            data        = response.json()
+            schedule_id = data.get("id", "")
+            logger.info(
+                f"PIM eligibility assigned — user={user_id}, "
+                f"group={group_id}, schedule={schedule_id}"
+            )
+            return {"schedule_id": schedule_id, "already_existed": False}
+
+        except GraphClientError:
+            raise
+        except Exception as e:
+            raise GraphClientError(
+                f"assign_pim_group_eligibility failed — "
+                f"user={user_id}, group={group_id}: {e}"
+            )
+
 
 
 def _generate_temp_password(employee_id: str) -> str:

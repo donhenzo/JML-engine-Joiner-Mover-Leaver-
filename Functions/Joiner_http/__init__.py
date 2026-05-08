@@ -135,7 +135,8 @@ def run_pipeline(
     events_client     = get_events_table_client(connection_string)
 
     try:
-        graph_client = JmlGraphClient(build_graph_client())
+        _graph_service_client, _credential = build_graph_client()
+        graph_client = JmlGraphClient(_graph_service_client, _credential)
     except Exception as e:
         logger.error(f"Failed to build Graph client: {e}")
         graph_client = None

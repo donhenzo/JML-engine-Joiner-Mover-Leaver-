@@ -13,6 +13,24 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PimGroup:
+    """
+    A PIM-eligible group resolved from the mapping rules.
+    The engine adds the user as an eligible member of this group.
+    The group must already hold an eligible Entra role assignment via PIM.
+    """
+    group_id:       str
+    display_name:   str
+    eligible_role:  str
+    justification:  str
+    duration_hours: int = 8
+
+
+
 
 @dataclass
 class EntitlementResult:
@@ -25,7 +43,9 @@ class EntitlementResult:
     """
     groups: list[str] = field(default_factory=list)
     rbac_roles: list[dict] = field(default_factory=list)
+    pim_groups:       list       = field(default_factory=list)  # list[PimGroup]
     matched_rule_ids: list[str] = field(default_factory=list)
+
 
 
 def _condition_matches(condition: dict, identity_value: str | None) -> bool:
@@ -108,6 +128,7 @@ def resolve_entitlements(
     # Accumulate before deduplication
     all_groups:     list[str]  = []
     all_rbac_roles: list[dict] = []
+    all_pim_groups: list       = [] 
 
     for rule in rules:
         rule_id = rule.get("id", "UNKNOWN")
@@ -121,6 +142,17 @@ def resolve_entitlements(
             all_groups.extend(matched_groups)
             all_rbac_roles.extend(matched_roles)
             result.matched_rule_ids.append(rule_id)
+
+            for entry in entitlements.get("pimGroups", []):
+                gid = entry.get("id", "").strip()
+                if gid:
+                    all_pim_groups.append(PimGroup(
+                        group_id=      gid,
+                        display_name=  entry.get("displayName", gid),
+                        eligible_role= entry.get("eligibleRole", ""),
+                        justification= entry.get("justification", "Provisioned by JML engine"),
+                        duration_hours=int(entry.get("durationHours", 8)),
+                    ))
 
             logger.debug(
                 f"Rule {rule_id} matched for employee {employee_id} — "
@@ -156,4 +188,13 @@ def resolve_entitlements(
             f"employment_type='{employment_type}'"
         )
 
+# Deduplicate PIM groups by group_id — preserve first-seen order
+    seen_pim_ids: set[str] = set()
+    for pg in all_pim_groups:
+        if pg.group_id not in seen_pim_ids:
+            result.pim_groups.append(pg)
+            seen_pim_ids.add(pg.group_id)
+
+
     return result
+

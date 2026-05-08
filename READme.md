@@ -149,7 +149,8 @@ The pipeline is linear and strictly sequenced. No record reaches provisioning wi
 ┌─────────────────────────────▼───────────────────────────────────┐
 │               ENTITLEMENT RESOLUTION LAYER                      │
 │   mapping_resolver.py evaluates Rules.json against payload      │
-│   JobTitle + Department + EmploymentType → Groups + RBAC        │
+│   JobTitle + Department + EmploymentType → Groups + RBAC + PIM  │
+│   pimGroups entries resolved alongside standard groups          │
 │   Multiple rules can contribute entitlements per identity       │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
@@ -159,6 +160,15 @@ The pipeline is linear and strictly sequenced. No record reaches provisioning wi
 │   Assign security groups  (SG_*, LIC_*, CA_*)                   │
 │   Assign Azure RBAC roles via group membership                  │
 │   All operations idempotent · ActionsTaken recorded live        │
+└─────────────────────────────┬───────────────────────────────────┘
+                              │
+┌─────────────────────────────▼───────────────────────────────────┐
+│              PIM ELIGIBILITY LAYER (Phase 2)                    │
+│   Group-based PIM pattern — engine assigns eligible membership  │
+│   Entra Role → PIM Group (eligible) → User (eligible member)   │
+│   User activates on demand · access expires automatically       │
+│   pimGroups entries in mapping rules drive this step            │
+│   Adding a new PIM mapping = one config entry, no code change   │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────────┐
@@ -173,6 +183,7 @@ The pipeline is linear and strictly sequenced. No record reaches provisioning wi
 │                       AUDIT LAYER                               │
 │   Per-identity JSON decision report · every outcome             │
 │   Actions taken · validation status · rule IDs · hold reasons   │
+│   PimEligibilityAssigned recorded per group in ActionsTaken     │
 │   Immutable · one file per identity event                       │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -232,6 +243,56 @@ The same CSV processed twice produces the same EventId. Azure Table Storage inse
 ### Concurrency Control
 
 A processing lock is written to the event row at the start of each run (`LockedAt`, `LockedBy`). Stale lock timeout is 10 minutes — if a function instance crashes, the lock auto-releases. Concurrent function instances processing the same event exit cleanly on the lock check.
+
+### PIM Eligible Role Assignment (Phase 2)
+
+Phase 2 extends the Joiner pipeline with group-based PIM eligibility assignment. The pattern is:
+
+```
+Entra Role (e.g. User Administrator)
+    ↓  eligible assignment (configured in portal once)
+PIM Security Group (e.g. SG_PIM_IT_UserAdmin)
+    ↓  eligible membership (assigned by JML engine per identity)
+User (provisioned by JML engine)
+```
+
+The user activates their group membership via PIM when they need the role. On activation they temporarily inherit the group's eligible Entra role. On deactivation or expiry the role is removed automatically. The engine never touches Entra role definitions directly — it only manages eligible group membership.
+
+**How it integrates with the mapping rules:**
+
+Adding a PIM mapping for a job title requires one `pimGroups` entry in the relevant rule in `role_mapping_rules.json`. No code changes:
+
+```json
+"pimGroups": [
+  {
+    "id":            "bcbd36bc-36e5-40f0-82e1-58270df9720d",
+    "displayName":   "SG_PIM_IT_UserAdmin",
+    "eligibleRole":  "User Administrator",
+    "justification": "IT Manager requires on-demand user administration access",
+    "durationHours": 8
+  }
+]
+```
+
+**Current PIM mappings:**
+
+| Job Title | PIM Group | Eligible For |
+|---|---|---|
+| Head of Finance | `SG_PIM_Finance_GlobalReader` | Global Reader |
+| Security HOD | `SG_PIM_Security_Admin` | Security Administrator |
+| IT Manager | `SG_PIM_IT_UserAdmin` | User Administrator |
+
+**Graph API endpoint used:**
+
+```
+POST /identityGovernance/privilegedAccess/group/eligibilityScheduleRequests
+```
+
+Requires `PrivilegedAccess.ReadWrite.AzureADGroup` and `PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup` on the app registration in addition to the existing permissions. The PIM groups must be created with `isAssignableToRole: true` — this flag cannot be changed after creation.
+
+**Audit trail:**
+
+Each PIM eligibility assignment is recorded in `ActionsTaken` as `PimEligibilityAssigned` with the group name and eligible role. If the assignment already exists on retry, `already_existed` is noted and the step passes cleanly.
 
 ### Post-Provision Graph Efficiency
 
@@ -301,6 +362,8 @@ The engine provisions into standardised groups only. Legacy groups are never ass
 
 ## Limitations and Trade-offs
 
+**PIM eligibility requires Entra ID P2 and role-assignable groups.** The `isAssignableToRole` flag on a group must be set at creation — it cannot be changed after the group exists. PIM eligibility schedule propagation can lag 15-30 seconds after assignment, which is why the post-provision PIM check is non-blocking. A FullScan will catch persistent gaps.
+
 **Dependent on HR data quality.** The normalisation layer resolves known variants but unknown values route to the hold queue. If the HR system produces field values not in the canonical lookup table, records will be held until the lookup is updated. Garbage in, hold queue out — not garbage in, provisioning out.
 
 **Pre-provision validation evaluates payload, not entitlements.** ENT-004 catches employment type and job title conflicts at the payload level. ENT-002 catches group membership conflicts at the post-provision level. Between the two gates there is a window where provisioning runs — if a mapping rule produces an entitlement that would violate policy, the post-provision gate catches it but the user object is created. The design decision was to keep the pre-provision gate fast (zero Graph calls) and the post-provision gate complete.
@@ -319,7 +382,7 @@ The engine provisions into standardised groups only. Legacy groups are never ass
 |---|---|---|
 | Phase 0 | Data contracts, normalisation, event store, hold queue, audit system | Complete |
 | Phase 1 | Joiner provisioning pipeline, governance gates, policy-driven entitlements | Complete |
-| Phase 2 | PIM eligible role assignment (requires Entra ID P2) | Designed, not started |
+| Phase 2 | PIM eligible role assignment via group-based PIM pattern (requires Entra ID P2) | Complete |
 | Phase 3 | Mover — delta calculation, permission recalibration, RetainList support | Designed, not started |
 | Phase 4 | Leaver — full revocation, session termination, M365/app removal | Designed, not started |
 
@@ -333,7 +396,7 @@ Full architecture decisions for all phases are documented in the Decision Log.
 |---|---|---|
 | Core provisioning (users, groups, RBAC) | Entra ID Free | Phase 0–1 |
 | Dynamic membership rules | Entra ID P1 | Phase 1 (optional enhancement) |
-| Privileged Identity Management (PIM) | Entra ID P2 | Phase 2 |
+| Privileged Identity Management (PIM) | Entra ID P2 | Phase 2 ✓ |
 
 The core engine requires no premium licensing. Premium features are additive layers.
 
@@ -379,8 +442,9 @@ JML-Engine/
 │   ├── mapping_loader.py            # Loads role_mapping_rules.json from Azure Storage
 │   └── mapping_resolver.py          # Evaluates rules against identity payload
 ├── Provisioning/
-│   ├── graph_client.py              # Microsoft Graph API client · writes employeeType to Entra
-│   └── provisioner.py               # Entra ID user · group · RBAC provisioning
+│   ├── graph_client.py              # Microsoft Graph API client · writes employeeType to Entra · PIM HTTP calls
+│   ├── pim_client.py                # PIM group eligibility assignment · delegates to graph_client
+│   └── provisioner.py               # Entra ID user · group · RBAC · PIM eligibility provisioning
 ├── Validation/
 │   └── validation_gate.py           # Pre- and post-provision validation gate (HTTP)
 ├── Hold_queue/

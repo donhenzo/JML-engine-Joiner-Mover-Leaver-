@@ -12,7 +12,8 @@
     "it": "Information Technology",
     "information technology": "Information Technology",
     "operations": "Operations",
-    "ops": "Operations"
+    "ops": "Operations",
+    "security": "Security"
   },
   "job_title": {
     "software engineer": "Software Engineer",
@@ -38,8 +39,8 @@
     "hr manager": "HR Manager",
     "it manager": "IT Manager",
     "operations director": "Operations Director",
-    "security hod" : "secuirty HOD",
-    "head of finance":     "Head of Finance"
+    "security hod" : "Security HOD",
+    "head of finance":  "Head of Finance"
   },
   "employment_type": {
     "employee": "Employee",

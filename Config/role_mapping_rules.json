@@ -236,6 +236,89 @@
     "groups": ["b7bfed9d-4531-4891-8347-1fed3c2f8d36"],
     "rbac_roles": []
   }
+}, 
+{
+  "id": "RULE-SECURITY-HOD",
+  "description": "Security HOD — security core, HOD group, E5, Security Addon, CA Privileged, PIM eligible for Security Administrator",
+  "priority": 200,
+  "conditions": {
+    "department": { "operator": "exact", "value": "Security" },
+    "job_title":  { "operator": "exact", "value": "Security HOD" }
+  },
+  "entitlements": {
+    "groups": [
+      "f6daa7ee-7873-4317-8b5b-59a059564fa7",
+      "f67c852c-74bd-4565-8ffc-d54a8da7f18e",
+      "5d92e3c8-9d19-46da-b692-26297278084e",
+      "4e73e839-33a0-49cf-83bc-6b27a32866b5",
+      "87a64cce-8b63-4b7e-8c1a-703a695ee2cc"
+    ],
+    "rbac_roles": [],
+    "pimGroups": [
+      {
+        "id":            "47a8c412-2dd8-4e41-ab10-baac977b50fc",
+        "displayName":   "SG_PIM_Security_Admin",
+        "eligibleRole":  "Security Administrator",
+        "justification": "Security HOD requires on-demand administrative access for incident response and policy enforcement",
+        "durationHours": 4
+      }
+    ]
+  }
+},
+{
+  "id": "RULE-IT-MANAGER",
+  "description": "IT Manager — IT core, manager group, E5, CA Privileged, PIM eligible for User Administrator",
+  "priority": 200,
+  "conditions": {
+    "department": { "operator": "exact", "value": "Information Technology" },
+    "job_title":  { "operator": "exact", "value": "IT Manager" }
+  },
+  "entitlements": {
+    "groups": [
+      "fc34a451-4897-4139-88e8-6464cd2f4a85",
+      "49349779-b40b-4989-af0c-bf2c78c459e1",
+      "5d92e3c8-9d19-46da-b692-26297278084e",
+      "87a64cce-8b63-4b7e-8c1a-703a695ee2cc"
+    ],
+    "rbac_roles": [],
+    "pimGroups": [
+      {
+        "id":            "bcbd36bc-36e5-40f0-82e1-58270df9720d",
+        "displayName":   "SG_PIM_IT_UserAdmin",
+        "eligibleRole":  "User Administrator",
+        "justification": "IT Manager requires on-demand user administration access for provisioning and helpdesk operations",
+        "durationHours": 8
+      }
+    ]
+  }
+},
+{
+  "id": "RULE-FINANCE-HOD",
+  "description": "Head of Finance — finance core, manager group, E5, Finance Addon, CA Privileged, PIM eligible for Global Reader",
+  "priority": 200,
+  "conditions": {
+    "department": { "operator": "exact", "value": "Finance" },
+    "job_title":  { "operator": "exact", "value": "Head of Finance" }
+  },
+  "entitlements": {
+    "groups": [
+      "8410d4d1-fe60-413f-9d2d-6d33200c6517",
+      "c2b66a61-cf52-4cf8-b9fe-7557efcf7853",
+      "5d92e3c8-9d19-46da-b692-26297278084e",
+      "ddfd7df2-a436-4f44-b8df-f90b95189958",
+      "87a64cce-8b63-4b7e-8c1a-703a695ee2cc"
+    ],
+    "rbac_roles": [],
+    "pimGroups": [
+      {
+        "id":            "bb561f0f-9a70-419d-8472-8e593e2369c6",
+        "displayName":   "SG_PIM_Finance_GlobalReader",
+        "eligibleRole":  "Global Reader",
+        "justification": "Head of Finance requires on-demand read access to tenant-wide audit and compliance data",
+        "durationHours": 8
+      }
+    ]
+  }
 }
   ]
 }
