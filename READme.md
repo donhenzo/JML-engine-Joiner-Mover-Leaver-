@@ -30,11 +30,11 @@ This creates three compounding failure modes:
 
 ## Why Existing Approaches Fail
 
-**Low-code workflow tooling** — such as Microsoft Entra ID Lifecycle Workflows is optimised for rapid deployment and operational orchestration. However, it lacks a centralised policy evaluation layer. Decision logic is distributed across workflows, group rules, and role assignments, making complex access decisions difficult to reason about, test, and audit consistently. While attribute-based rules can be implemented, they become fragmented and difficult to maintain at scale. Audit logs capture events, but not structured policy decisions, which limits the ability to reconstruct why a specific access outcome occurred.
+**Low-code workflow tooling**: such as Microsoft Entra ID Lifecycle Workflows is optimised for rapid deployment and operational orchestration. However, it lacks a centralised policy evaluation layer. Decision logic is distributed across workflows, group rules, and role assignments, making complex access decisions difficult to reason about, test, and audit consistently. While attribute-based rules can be implemented, they become fragmented and difficult to maintain at scale. Audit logs capture events, but not structured policy decisions, which limits the ability to reconstruct why a specific access outcome occurred.
 
-**Manual provisioning** — IT ticket-based workflows fails not because people make mistakes, but because they introduce structural inconsistency. Policy lives in the mind of the engineer processing the ticket. It cannot be tested, versioned, or audited in any meaningful way.
+**Manual provisioning**:  IT ticket-based workflows fails not because people make mistakes, but because they introduce structural inconsistency. Policy lives in the mind of the engineer processing the ticket. It cannot be tested, versioned, or audited in any meaningful way.
 
-**Post-provision validation** — running compliance scans after identities are created addresses the symptom rather than the cause. The incorrectly provisioned identity already exists. Remediating it requires additional work, additional audit entries, and in some cases, a formal incident record.
+**Post-provision validation**: running compliance scans after identities are created addresses the symptom rather than the cause. The incorrectly provisioned identity already exists. Remediating it requires additional work, additional audit entries, and in some cases, a formal incident record.
 
 None of these approaches treat access correctness as a provisioning prerequisite. This engine does.
 
@@ -57,10 +57,10 @@ This project implements a policy-driven identity lifecycle engine that evaluates
 The engine enforces:
 
 - **Pre-provision governance validation**: no identity is created without clearing a hard policy gate
-- **Canonical data normalisation** : raw HR field values are resolved to controlled canonical values before any decision is made; unresolvable values are prevented from reaching provisioning
-- **Policy-driven entitlement resolution** : group and RBAC assignments are derived from externally configurable rule objects, not hardcoded logic
-- **Deterministic idempotency** : the same HR event processed twice produces exactly one outcome; retries are safe
-- **Immutable audit reporting** : every decision, every rule ID, every failure reason is written to a per-identity JSON report regardless of outcome
+- **Canonical data normalisation**: raw HR field values are resolved to controlled canonical values before any decision is made; unresolvable values are prevented from reaching provisioning
+- **Policy-driven entitlement resolution**: group and RBAC assignments are derived from externally configurable rule objects, not hardcoded logic
+- **Deterministic idempotency**: the same HR event processed twice produces exactly one outcome; retries are safe
+- **Immutable audit reporting**: every decision, every rule ID, every failure reason is written to a per-identity JSON report regardless of outcome
 
 ---
 
