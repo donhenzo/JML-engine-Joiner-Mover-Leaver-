@@ -6,7 +6,7 @@
 
 ## Executive Summary
 
-Most identity provisioning systems create users first and validate access later. In that window — however brief — an identity can exist with incorrect group memberships, excessive permissions, or attribute conflicts that violate access policy. In regulated environments, that window is auditable. It shows up in access reviews. It has to be explained.
+Most identity provisioning systems create users first and validate access later. In that window however brief an identity can exist with incorrect group memberships, excessive permissions, or attribute conflicts that violate access policy. In regulated environments, that window is auditable. It shows up in access reviews. It has to be explained.
 
 This project implements a pre-validation identity lifecycle engine for Microsoft Entra ID. No identity is created unless it first passes a pre-provision governance validation gate on its canonical attributes. Contractors cannot be provisioned into management-tier groups. Invalid HR data is prevented from reaching provisioning. Every decision is recorded in an immutable audit report regardless of outcome.
 
@@ -22,7 +22,7 @@ This creates three compounding failure modes:
 
 **Incorrect access from day one.** Without a defined policy engine, group assignment is inconsistent. Two people with the same job title in different departments can receive materially different access depending on who provisioned them. The same misconfiguration that slips through once becomes a pattern at scale.
 
-**A window of unauthorized access.** Even in systems that validate post-provision, the identity exists with potentially incorrect access during the window between creation and remediation. In a regulated environment — financial services, healthcare, government — that window is not a technicality. It appears in audit logs. It requires explanation during access reviews. It can constitute a control failure.
+**A window of unauthorized access.** Even in systems that validate post-provision, the identity exists with potentially incorrect access during the window between creation and remediation. In a regulated environment like financial services, healthcare, government that window is not a technicality. It appears in audit logs. It requires explanation during access reviews. It can constitute a control failure.
 
 **No structured audit trail.** When provisioning is handled through tickets, scripts, or disconnected workflow tools, there is no structured record of what was provisioned, what policy drove the decision, or what happened when a step failed. Compliance evidence is reconstructed retrospectively, which introduces risk and operational cost.
 
@@ -30,11 +30,11 @@ This creates three compounding failure modes:
 
 ## Why Existing Approaches Fail
 
-**Low-code workflow tooling** — such as Microsoft Entra ID Lifecycle Workflows — is optimised for rapid deployment and operational orchestration. However, it lacks a centralised policy evaluation layer. Decision logic is distributed across workflows, group rules, and role assignments, making complex access decisions difficult to reason about, test, and audit consistently. While attribute-based rules can be implemented, they become fragmented and difficult to maintain at scale. Audit logs capture events, but not structured policy decisions, which limits the ability to reconstruct why a specific access outcome occurred.
+**Low-code workflow tooling** — such as Microsoft Entra ID Lifecycle Workflows is optimised for rapid deployment and operational orchestration. However, it lacks a centralised policy evaluation layer. Decision logic is distributed across workflows, group rules, and role assignments, making complex access decisions difficult to reason about, test, and audit consistently. While attribute-based rules can be implemented, they become fragmented and difficult to maintain at scale. Audit logs capture events, but not structured policy decisions, which limits the ability to reconstruct why a specific access outcome occurred.
 
-**Manual provisioning** — IT ticket-based workflows — fail not because people make mistakes, but because they introduce structural inconsistency. Policy lives in the mind of the engineer processing the ticket. It cannot be tested, versioned, or audited in any meaningful way.
+**Manual provisioning** — IT ticket-based workflows fails not because people make mistakes, but because they introduce structural inconsistency. Policy lives in the mind of the engineer processing the ticket. It cannot be tested, versioned, or audited in any meaningful way.
 
-**Post-provision validation** — running compliance scans after identities are created — addresses the symptom rather than the cause. The incorrectly provisioned identity already exists. Remediating it requires additional work, additional audit entries, and in some cases, a formal incident record.
+**Post-provision validation** — running compliance scans after identities are created addresses the symptom rather than the cause. The incorrectly provisioned identity already exists. Remediating it requires additional work, additional audit entries, and in some cases, a formal incident record.
 
 None of these approaches treat access correctness as a provisioning prerequisite. This engine does.
 
@@ -44,7 +44,7 @@ None of these approaches treat access correctness as a provisioning prerequisite
 
 This engine is not a replacement for identity platforms such as Microsoft Entra ID or governance suites like SailPoint IdentityIQ or Saviynt Identity Cloud.
 
-It operates as a policy enforcement layer that sits between HR systems and identity platforms, ensuring that all provisioning requests are policy-compliant before execution. The focus is on the decision layer — how access entitlements are computed, validated, and recorded — rather than on directory management or access request workflows.
+It operates as a policy enforcement layer that sits between HR systems and identity platforms, ensuring that all provisioning requests are policy-compliant before execution. The focus is on the decision layer how access entitlements are computed, validated, and recorded rather than on directory management or access request workflows.
 
 ---
 
@@ -56,11 +56,11 @@ This project implements a policy-driven identity lifecycle engine that evaluates
 
 The engine enforces:
 
-- **Pre-provision governance validation** — no identity is created without clearing a hard policy gate
-- **Canonical data normalisation** — raw HR field values are resolved to controlled canonical values before any decision is made; unresolvable values are prevented from reaching provisioning
-- **Policy-driven entitlement resolution** — group and RBAC assignments are derived from externally configurable rule objects, not hardcoded logic
-- **Deterministic idempotency** — the same HR event processed twice produces exactly one outcome; retries are safe
-- **Immutable audit reporting** — every decision, every rule ID, every failure reason is written to a per-identity JSON report regardless of outcome
+- **Pre-provision governance validation**: no identity is created without clearing a hard policy gate
+- **Canonical data normalisation** : raw HR field values are resolved to controlled canonical values before any decision is made; unresolvable values are prevented from reaching provisioning
+- **Policy-driven entitlement resolution** : group and RBAC assignments are derived from externally configurable rule objects, not hardcoded logic
+- **Deterministic idempotency** : the same HR event processed twice produces exactly one outcome; retries are safe
+- **Immutable audit reporting** : every decision, every rule ID, every failure reason is written to a per-identity JSON report regardless of outcome
 
 ---
 
@@ -70,13 +70,13 @@ The engine enforces:
 The governance validation engine evaluates the canonical identity payload against 27 rules before any Entra ID object is created. A Contractor attempting to be provisioned into a Manager-tier group is blocked before a user object exists. A payload with a missing manager relationship is held for human review. Provisioning cannot proceed unless the gate passes.
 
 **Policy Rules Engine**
-Entitlement decisions are resolved by evaluating externally loaded rule objects against the canonical identity payload. Adding a new role mapping — new job title, new department, new group assignment — is a configuration file edit with no redeployment. Every entitlement decision is traceable to a named rule ID in the audit report.
+Entitlement decisions are resolved by evaluating externally loaded rule objects against the canonical identity payload. Adding a new role mapping, new job title, new department, new group assignment is a configuration file edit with no redeployment. Every entitlement decision is traceable to a named rule ID in the audit report.
 
 **Employment Type Enforcement**
-The engine enforces employment type constraints at the payload level. Contractors and Interns cannot be provisioned into management-tier or privileged groups. This check runs in the pre-provision gate against the payload itself — the user is never created if the combination violates policy.
+The engine enforces employment type constraints at the payload level. Contractors and Interns cannot be provisioned into management-tier or privileged groups. This check runs in the pre-provision gate against the payload itself, the user is never created if the combination violates policy.
 
 **Canonical Normalisation Layer**
-Raw HR field values — variant spellings, case differences, abbreviations — are resolved to canonical values before any downstream component sees them. Unknown values route to the hold queue, not to provisioning. Policy changes to the canonical lookup require no code changes.
+Raw HR field values, variant spellings, case differences, abbreviations are resolved to canonical values before any downstream component sees them. Unknown values route to the hold queue, not to provisioning. Policy changes to the canonical lookup require no code changes.
 
 **Deterministic Idempotency**
 The EventId is a SHA-256 hash of EmployeeId, Action, and StartDate. The same input always produces the same ID. Processing the same CSV twice produces one outcome. Function retries resolve safely without double-provisioning.
@@ -85,10 +85,10 @@ The EventId is a SHA-256 hash of EmployeeId, Action, and StartDate. The same inp
 Records that fail normalisation or validation are not discarded. They enter a formal state machine with explicit transitions, reason codes, retry counts, and a manual release path. Every held record is explainable and actionable.
 
 **Immutable Per-Identity Audit Reports**
-Every lifecycle event produces a structured JSON report regardless of outcome — pass, hold, or fail. Reports capture every action taken, every gate result, every rule ID that fired, and every failure reason. Each report provides full decision traceability, linking every provisioning outcome to the exact rule set and evaluation path that produced it. One file per identity event, written at the time of processing, never modified.
+Every lifecycle event produces a structured JSON report regardless of outcome - pass, hold, or fail. Reports capture every action taken, every gate result, every rule ID that fired, and every failure reason. Each report provides full decision traceability, linking every provisioning outcome to the exact rule set and evaluation path that produced it. One file per identity event, written at the time of processing, never modified.
 
 **Post-Provision Validation**
-After provisioning completes, the validation engine re-runs against the real Entra ID object to confirm the provisioned state matches the expected entitlements. This uses a targeted O(1) Graph API path — three calls regardless of tenant size — rather than a full tenant scan. This design prioritises deterministic validation speed at the pre-provision stage, at the cost of deferring entitlement-state validation to the post-provision gate.
+After provisioning completes, the validation engine re-runs against the real Entra ID object to confirm the provisioned state matches the expected entitlements. This uses a targeted O(1) Graph API path, three calls regardless of tenant size  rather than a full tenant scan. This design prioritises deterministic validation speed at the pre-provision stage, at the cost of deferring entitlement-state validation to the post-provision gate.
 
 ---
 
@@ -98,7 +98,7 @@ After provisioning completes, the validation engine re-runs against the real Ent
 Access is derived from validated identity attributes against a declarative policy. No speculative or convenience-based group assignments. Entitlements are the minimum required for the role and employment type.
 
 **Separation of Duties**
-The policy rule set enforces employment type constraints across privilege tiers. Contractors cannot hold Manager-tier group memberships. The engine enforces this structurally — it is not dependent on human review.
+The policy rule set enforces employment type constraints across privilege tiers. Contractors cannot hold Manager-tier group memberships. The engine enforces this structurally, it is not dependent on human review.
 
 **Governance Before Access**
 Provisioning is conditional on governance validation. The pre-provision gate is a hard block, not a recommendation. This closes the window of incorrect access that post-hoc validation leaves open.
@@ -224,9 +224,9 @@ The validation engine evaluates 27 rules across six categories. Rules are declar
 | RBAC | RBAC-001/002/003 | RBAC-003 |
 | Correlation | CORR-001/002/003/004/005 | CORR-001/002/003 |
 
-**ENT-004** is the pre-provision payload check — it evaluates employment type against job title before any Entra object exists. Contractors and Interns attempting to be provisioned into Manager, Director, HOD, or Executive roles are blocked at this gate.
+**ENT-004** is the pre-provision payload check, it evaluates employment type against job title before any Entra object exists. Contractors and Interns attempting to be provisioned into Manager, Director, HOD, or Executive roles are blocked at this gate.
 
-**ENT-002** is the post-provision entitlement check — it evaluates actual group memberships against the entitlement model's `allowedEmployment` policy after provisioning completes.
+**ENT-002** is the post-provision entitlement check, it evaluates actual group memberships against the entitlement model's `allowedEmployment` policy after provisioning completes.
 
 ### Employment Type Vocabulary
 
@@ -256,7 +256,7 @@ PIM Security Group (e.g. SG_PIM_IT_UserAdmin)
 User (provisioned by JML engine)
 ```
 
-The user activates their group membership via PIM when they need the role. On activation they temporarily inherit the group's eligible Entra role. On deactivation or expiry the role is removed automatically. The engine never touches Entra role definitions directly — it only manages eligible group membership.
+The user activates their group membership via PIM when they need the role. On activation they temporarily inherit the group's eligible Entra role. On deactivation or expiry the role is removed automatically. The engine never touches Entra role definitions directly it only manages eligible group membership.
 
 **How it integrates with the mapping rules:**
 
