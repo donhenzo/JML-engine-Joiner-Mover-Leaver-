@@ -370,7 +370,7 @@ The engine provisions into standardised groups only. Legacy groups are never ass
 
 **Policy complexity scales with the mapping rule set.** As the number of departments, job titles, and employment types grows, the `Rules.json` entitlement model grows with it. Without a role abstraction layer (planned), HR title changes require mapping rule updates.
 
-**No real-time HR integration yet.** The engine consumes CSV input designed to mirror what an HR API would return. Live webhook integration is deferred — the CSV schema is designed as a drop-in replacement for the live feed.
+**HR API integration is polling-based, not webhook-driven.** The engine pulls from BambooHR via delta polling and processes changes since the last checkpoint. Live webhook integration is the planned next step — `run_single()` is already the atomic unit, so a webhook handler requires no pipeline changes, only a new HTTP trigger entry point.
 
 **Hold Queue UI not implemented.** Held records are visible in Azure Table Storage and the audit reports. A manual review and release interface is deferred.
 
@@ -386,7 +386,6 @@ The engine provisions into standardised groups only. Legacy groups are never ass
 | Phase 3 | Mover — delta calculation, permission recalibration, RetainList support | Designed, not started |
 | Phase 4 | Leaver — full revocation, session termination, M365/app removal | Designed, not started |
 
-Full architecture decisions for all phases are documented in the Decision Log.
 
 ---
 
@@ -401,6 +400,75 @@ Full architecture decisions for all phases are documented in the Decision Log.
 The core engine requires no premium licensing. Premium features are additive layers.
 
 ---
+---
+
+## HR API Integration
+
+The engine supports live HR API ingestion as an alternative to CSV input. The integration layer sits between the HR system and the existing pipeline — every downstream component (normalisation, validation, provisioning, audit) is unchanged.
+
+### Architecture
+
+```
+BambooHR API
+  ↓ bamboohr_client.py        fetch employee · fetch changed employees · directory cache
+  ↓ bamboohr_mapper.py        BambooHR fields → raw IdentityPayload shape
+  ↓ action_deriver.py         Joiner / Mover / Skip — derived from live Entra state
+  ↓ ingestion_coordinator.py  run_single · run_delta · run_bulk
+  ↓ pipeline_adapter.py       bridges HR API records into the existing pipeline
+  ↓ existing pipeline         normalise → validate → provision → audit (unchanged)
+```
+
+### Ingestion Modes
+
+| Mode | Command | Description |
+|---|---|---|
+| Single / batch | `--source api --id Acc003,Acc004` | Process specific employees by employee number, UPN, or BambooHR ID |
+| Delta poll | `--source api --mode delta` | Process all employees changed since last checkpoint |
+| CSV (original) | `--csv Data/sample.csv` | Original path — unchanged |
+
+### Action Derivation
+
+Before entering the pipeline, each HR record is evaluated against live Entra ID state to determine the correct lifecycle action:
+
+- **Joiner** — UPN not found in Entra → new identity, provision from scratch
+- **Mover** — UPN exists, department or job title changed → entitlement recalculation (Phase 3)
+- **Skip** — UPN exists, no meaningful change → no action taken
+
+### Idempotency
+
+Three layers prevent double-provisioning under any ingestion mode:
+
+1. **Delta timestamp** — narrows the BambooHR query window to changes since last successful poll
+2. **Action derivation** — filters records with no meaningful change before they reach the pipeline
+3. **EventId + claim_event()** — SHA-256 deterministic event ID; Azure Table Storage insert fails atomically if the row already exists
+
+### State Persistence
+
+Poll checkpoints are stored in Azure Table Storage (`JmlSystemState` table, separate from `JmlEvents`):
+
+```
+PartitionKey: "SYSTEM"
+RowKey:       "HR_POLL_CHECKPOINT"
+Fields:       LastSuccessfulPoll · LastRunStatus · RecordsProcessed · LastEventId
+```
+
+The timestamp only advances on a successful poll. On failure, the next run re-processes the same window — idempotency handles duplicates safely.
+
+### Directory Cache
+
+On the first employee lookup per run, the client fetches the full BambooHR directory once and builds an in-memory `employeeNumber → internal ID` map. All subsequent lookups in the same batch resolve instantly from cache — no repeated API calls per employee.
+
+### Ingestion Layer Structure
+
+```
+Ingestion/hr_api/
+├── bamboohr_client.py        # BambooHR API client · directory cache · resolve by employee number or UPN
+├── bamboohr_mapper.py        # Field translation · employeeNumber as employee_id
+├── action_deriver.py         # Joiner / Mover / Skip derivation via live Graph lookup
+├── system_state.py           # Poll checkpoint persistence · Azure Table Storage
+├── pipeline_adapter.py       # Bridges HR API records into existing pipeline
+└── ingestion_coordinator.py  # Orchestrates fetch · derive · pipeline · checkpoint
+```
 
 ## Running Locally
 
@@ -411,11 +479,20 @@ pip install -r requirements.txt
 # Terminal 1 — start the PowerShell validation engine
 cd Validation_engine
 func start
-# Wait for: profile.ps1: Connected to Microsoft Graph successfully
+# Wait for: Host lock lease acquired by instance ID. 
 
-# Terminal 2 — run the JML pipeline
+# Terminal 2 — CSV mode (original)
 cd JML-engine
 python scripts/run_local.py --clean --output reports --csv Data/sample_hr.csv
+
+# Terminal 2 — API mode (single employee by employee number)
+python scripts/run_local.py --source api --id Acc003
+
+# Terminal 2 — API mode (batch)
+python scripts/run_local.py --source api --id Acc003,Acc004,Acc005,Acc006 --clean --output reports
+
+# Terminal 2 — API mode (delta poll — changes since last checkpoint)
+python scripts/run_local.py --source api --mode delta
 
 # Audit reports written to reports/{employee_id}_{event}_{timestamp}.json
 ```
@@ -434,7 +511,14 @@ JML-Engine/
 │       └── conflict_queue.py        # Conflicting event FIFO queue
 ├── Ingestion/
 │   ├── csv_parser.py                # CSV ingestion · structural validation
-│   └── schema.py                    # IdentityPayload · JmlAction · EmploymentType enums
+│   ├── schema.py                    # IdentityPayload · JmlAction · EmploymentType enums
+│   └── hr_api/                      # HR API ingestion layer
+│       ├── bamboohr_client.py       # BambooHR API client · directory cache
+│       ├── bamboohr_mapper.py       # Field translation · employeeNumber as employee_id
+│       ├── action_deriver.py        # Joiner / Mover / Skip derivation
+│       ├── system_state.py          # Poll checkpoint · Azure Table Storage
+│       ├── pipeline_adapter.py      # Bridges HR records into existing pipeline
+│       └── ingestion_coordinator.py # Orchestrates fetch · derive · pipeline
 ├── Normalization/
 │   ├── lookup_loader.py             # Loads canonical_lookup.json
 │   └── normalizer.py                # Resolves raw field values · accumulates failures

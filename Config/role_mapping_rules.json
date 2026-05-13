@@ -114,6 +114,18 @@
       }
     },
     {
+  "id": "RULE-IT-001",
+  "description": "Information Technology — all staff baseline",
+  "priority": 100,
+  "conditions": {
+    "department": { "operator": "exact", "value": "Information Technology" }
+  },
+  "entitlements": {
+    "groups": ["fc34a451-4897-4139-88e8-6464cd2f4a85"],
+    "rbac_roles": []
+  }
+},
+    {
       "id": "RULE-EMP-CONTRACTOR",
       "description": "Employment type — Contractor gets contractor group for their department",
       "priority": 300,
@@ -225,6 +237,18 @@
       }
     },
     {
+  "id": "RULE-LIC-E3-IT",
+  "description": "Licensing — M365 E3 for IT",
+  "priority": 500,
+  "conditions": {
+    "department": { "operator": "exact", "value": "Information Technology" }
+  },
+  "entitlements": {
+    "groups": ["d18f0b08-1ab6-462b-95ff-707c88cc7e0b"],
+    "rbac_roles": []
+  }
+},
+    {
   "id": "RULE-ENG-MANAGER",
   "description": "Engineering Manager — all employment types — Manager group",
   "priority": 200,
@@ -237,6 +261,36 @@
     "rbac_roles": []
   }
 }, 
+{
+  "id": "RULE-IT-SECENG",
+  "description": "IT Security Engineer — IT core, E5, standard CA",
+  "priority": 200,
+  "conditions": {
+    "department": { "operator": "exact", "value": "Information Technology" },
+    "job_title": { "operator": "exact", "value": "IT Security Engineer" }
+  },
+  "entitlements": {
+    "groups": ["fc34a451-4897-4139-88e8-6464cd2f4a85"],
+    "rbac_roles": []
+  }
+},
+{
+  "id": "RULE-IT-DIRECTOR",
+  "description": "Director of IT — IT core, manager group, E5, privileged CA",
+  "priority": 200,
+  "conditions": {
+    "department": { "operator": "exact", "value": "Information Technology" },
+    "job_title": { "operator": "exact", "value": "Director of IT" }
+  },
+  "entitlements": {
+    "groups": [
+      "49349779-b40b-4989-af0c-bf2c78c459e1",
+      "5d92e3c8-9d19-46da-b692-26297278084e",
+      "87a64cce-8b63-4b7e-8c1a-703a695ee2cc"
+    ],
+    "rbac_roles": []
+  }
+},
 {
   "id": "RULE-SECURITY-HOD",
   "description": "Security HOD — security core, HOD group, E5, Security Addon, CA Privileged, PIM eligible for Security Administrator",

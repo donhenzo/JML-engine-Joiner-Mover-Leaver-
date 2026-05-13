@@ -137,8 +137,8 @@ class JmlGraphClient:
     def get_user(self, upn: str) -> dict:
         """
         Retrieve a user from Entra ID by UPN.
-
-        Returns a dict with id, upn, display_name, and account_enabled.
+        Returns a dict with id, upn, display_name, account_enabled,
+        department, and job_title.
 
         Raises UserNotFoundError if the UPN does not exist — callers use
         this to distinguish a missing user from a real API error.
@@ -148,8 +148,22 @@ class JmlGraphClient:
         and by the provisioner itself to detect retry scenarios where the user
         was created but the object ID was never recorded.
         """
+        from msgraph.generated.users.item.user_item_request_builder import UserItemRequestBuilder
+
         try:
-            user = self._run(self._client.users.by_user_id(upn).get())
+            query_params = UserItemRequestBuilder.UserItemRequestBuilderGetQueryParameters(
+                select=["id", "userPrincipalName", "displayName",
+                        "accountEnabled", "department", "jobTitle"]
+            )
+            request_config = UserItemRequestBuilder.UserItemRequestBuilderGetRequestConfiguration(
+                query_parameters=query_params
+            )
+
+            user = self._run(
+                self._client.users.by_user_id(upn).get(
+                    request_configuration=request_config
+                )
+            )
 
             if user is None:
                 raise UserNotFoundError(f"User not found: {upn}")
@@ -159,6 +173,8 @@ class JmlGraphClient:
                 "upn":             user.user_principal_name,
                 "display_name":    user.display_name,
                 "account_enabled": user.account_enabled,
+                "department":      user.department,
+                "job_title":       user.job_title,
             }
 
         except UserNotFoundError:

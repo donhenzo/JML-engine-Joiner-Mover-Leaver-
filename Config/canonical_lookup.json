@@ -40,11 +40,24 @@
     "it manager": "IT Manager",
     "operations director": "Operations Director",
     "security hod" : "Security HOD",
-    "head of finance":  "Head of Finance"
+    "head of finance":  "Head of Finance",
+    "Sales director": "Sales manager",
+    "Sr. director of sales": "HOD Sales",
+    "it security engineer": "IT Security Engineer",
+    "security engineer": "IT Security Engineer",
+    "accountant": "Accountant",
+    "director of it": "Director of IT",
+    "it director": "Director of IT" 
   },
-  "employment_type": {
+ "employment_type": {
     "employee": "Employee",
+    "full-time": "Employee",
+    "ft": "Employee",
+    "fte": "Employee",
+    "permanent": "Employee",
     "contractor": "Contractor",
+    "contract": "Contractor",
+    "part-time": "Contractor",
     "guest": "Guest",
     "intern": "Intern"
   },
