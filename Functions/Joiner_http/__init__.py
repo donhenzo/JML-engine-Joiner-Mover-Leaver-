@@ -24,15 +24,17 @@ FULL SEQUENCE PER RECORD:
     1.  Parse CSV or HR api input.
     2.  Construct IdentityPayload
     3.  Normalise (department + job_title canonicalisation)
-    4.  Claim event          — idempotency gate, exits on duplicate
-    5.  Conflict check       — FIFO queue, parks event if one is active
-    6.  Resolve entitlements — mapping rules determine groups + RBAC roles
-    7.  Pre-provision validation gate
-    8.  Acquire lock
-    9.  Provision via Graph API
-    10. Post-provision validation
-    11. Release lock + mark event Completed
-    12. Write audit report
+    4.  Check for stale locks — reclaim if >10 minutes old
+    5.  Claim event          — idempotency gate, exits on duplicate
+    6.  Conflict check       — FIFO queue, parks event if one is active
+    7.  Resolve entitlements — mapping rules determine groups + RBAC roles
+    8.  Pre-provision validation gate
+    9.  Acquire lock
+    10. Provision via Graph API
+    11. Post-provision validation
+    12. Release lock + mark event Completed
+    13. Release next queued event (if any)
+    14. Write audit report
 
     One DecisionReport is written per record regardless of outcome.
 """
@@ -73,11 +75,13 @@ from Functions.Event_store.event_store import (
     acquire_lock,
     release_lock,
     update_event_status,
+    check_active_event,
     EventStatus,
 )
 from Functions.Event_store.conflict_queue import (
     check_and_handle_conflict,
     ConflictOutcome,
+    release_next_queued_event,
 )
 from Validation.validation_gate import pre_provision_validate, post_provision_validate
 from Provisioning.provisioner import provision_joiner
@@ -113,13 +117,14 @@ def run_pipeline(
     correlation_id: str = "local",
 ) -> PipelineResult:
     """
-    Run the Phase 1 JML Joiner pipeline against a CSV file.
+    Run the Phase 1 JML Joiner pipeline against a CSV file or HR API data. 
 
     Flow per record:
         Parse CSV → construct IdentityPayload → normalize
-        → claim event → conflict check → resolve entitlements
-        → pre-provision validation → acquire lock → provision
-        → post-provision validation → release lock → audit report
+        → check for stale locks → claim event → conflict check
+        → resolve entitlements → pre-provision validation
+        → acquire lock → provision → post-provision validation
+        → release lock → release next queued event → audit report
 
     One DecisionReport is written per record regardless of outcome.
     """
@@ -156,7 +161,7 @@ def run_pipeline(
     parse_result = parse_csv(csv_content)
 
     #  Parse rejections 
-    # Record never reached provisioning — goes to hold queue for operator review.
+    # Record never reached provisioning, i.e failed normalization and other checks.  also builds audit trail of the failure reasons
     for raw_row in parse_result.rejected_rows:
         employee_id = raw_row.get("EmployeeId", "unknown")
         upn         = raw_row.get("UPN", "unknown")
@@ -258,7 +263,36 @@ def run_pipeline(
         )
         normalised_payload = norm_result.payload
 
-        # Step 3 — Claim event
+        # Step 3 — Check for stale locks (GAP-002 remediation)
+        # If another instance crashed mid-provisioning >10 minutes ago,
+        # check_active_event() will reclaim the lock and return None.
+        # If another instance is actively processing right now, skip this record.
+        active = check_active_event(
+            table_client=events_client,
+            employee_id=normalised_payload.employee_id
+        )
+
+        if active and active.status == EventStatus.PROCESSING:
+            # Another instance is actively processing this employee right now
+            logger.info(
+                f"Active event in progress — employee={normalised_payload.employee_id}, "
+                f"locked_by={active.locked_by}, exiting"
+            )
+            report.add_action(
+                action="ActiveEventSkipped",
+                detail=f"Another instance processing this employee (locked by {active.locked_by})",
+                succeeded=True
+            )
+            all_reports.append(report)
+            _write_report(report, output_dir, result)
+            result.total     += 1
+            result.succeeded += 1
+            continue
+
+        # If check_active_event reclaimed a stale lock, it returned None
+        # and the event is now Pending. claim_event() below will handle it.
+
+        # Step 4 — Claim event
         import json as _json
         payload_json = _json.dumps({
             "employee_id": normalised_payload.employee_id,
@@ -283,7 +317,7 @@ def run_pipeline(
             )
             report.add_action(
                 action="DuplicateEventSkipped",
-                detail="Event already exists in event store — idempotency exit",
+                detail="Event already exists in event store, idempotency exit",
                 succeeded=True
             )
             all_reports.append(report)
@@ -298,7 +332,7 @@ def run_pipeline(
             normalised_payload.start_date.isoformat(),
         )
 
-        # Step 4 — Conflict check
+        # Step 5 — Conflict check
         conflict_outcome = check_and_handle_conflict(
             table_client= events_client,
             employee_id=  normalised_payload.employee_id,
@@ -321,7 +355,7 @@ def run_pipeline(
             result.succeeded += 1
             continue
 
-        # Step 5 — Resolve entitlements
+        # Step 6 — Resolve entitlements
         entitlements = resolve_entitlements(
             rules=           mapping_rules,
             department=      normalised_payload.department,
@@ -345,7 +379,7 @@ def run_pipeline(
                 "No mapping rules matched — user will have no group or RBAC assignments"
             )
 
-        # Step 6 — Pre-provision validation gate
+        # Step 7 — Pre-provision validation gate
         # Failures go to the hold queue — never reached provisioning.
         validation_result = pre_provision_validate(normalised_payload)
 
@@ -379,7 +413,7 @@ def run_pipeline(
         for warning in validation_result.warning_summary():
             report.add_warning(warning)
 
-        # Step 7 — Guard: Graph client must be available before acquiring lock.
+        # Step 8 — Guard: Graph client must be available before acquiring lock.
         # A missing client means provisioning cannot run — record as failed,
         # not held, because the data was valid and the block is infrastructure.
         if graph_client is None:
@@ -412,9 +446,10 @@ def run_pipeline(
             event_status= EventStatus.PROCESSING,
         )
 
+        # INTEGRATION POINT 2 — Provisioning Failed Mid-Sequence
         if not provisioning_result.succeeded:
             # Provisioning ran but a step failed mid-sequence.
-            # Record as failed — the identity may be partially provisioned.
+            # Record as failed, the identity may be partially provisioned.
             # Retry from beginning is safe because all Graph operations are idempotent.
             release_lock(events_client, normalised_payload.employee_id, event_id)
             update_event_status(
@@ -424,13 +459,26 @@ def run_pipeline(
                 status=       EventStatus.FAILED,
                 failure_step= provisioning_result.failure_step,
             )
+            
+            # Release next queued event (will be held for manual review)
+            next_event = release_next_queued_event(
+                table_client=       events_client,
+                employee_id=        normalised_payload.employee_id,
+                predecessor_status= EventStatus.FAILED,
+            )
+            if next_event:
+                logger.warning(
+                    f"Next queued event held for review — employee={normalised_payload.employee_id}, "
+                    f"event_id={next_event.event_id} — predecessor failed at {provisioning_result.failure_step}"
+                )
+            
             all_reports.append(report)
             _write_report(report, output_dir, result)
             result.total  += 1
             result.failed += 1  
             continue
 
-        # Step 8 — Post-provision validation
+        # Step 9 — Post-provision validation
         # Provisioning completed but tenant state may not match expected.
         # Record as failed — distinct from a data hold.
         post_result = post_provision_validate(
@@ -438,6 +486,7 @@ def run_pipeline(
             employee_id=    normalised_payload.employee_id,
         )
 
+        # INTEGRATION POINT 3 — Post-Provision Validation Failed
         if not post_result.passed:
             report.validation_status = ValidationStatus.FAILED
             report.add_action(
@@ -453,6 +502,19 @@ def run_pipeline(
                 status=       EventStatus.FAILED,
                 failure_step= "PostProvisionValidation",
             )
+            
+            # Release next queued event (will be held for manual review)
+            next_event = release_next_queued_event(
+                table_client=       events_client,
+                employee_id=        normalised_payload.employee_id,
+                predecessor_status= EventStatus.FAILED,
+            )
+            if next_event:
+                logger.warning(
+                    f"Next queued event held for review — employee={normalised_payload.employee_id}, "
+                    f"event_id={next_event.event_id} — predecessor failed post-provision validation"
+                )
+            
             all_reports.append(report)
             _write_report(report, output_dir, result)
             result.total  += 1
@@ -462,6 +524,7 @@ def run_pipeline(
         for warning in post_result.warning_summary():
             report.add_warning(warning)
 
+        # INTEGRATION POINT 1 — Provisioning Succeeded
         release_lock(events_client, normalised_payload.employee_id, event_id)
         update_event_status(
             table_client=events_client,
@@ -469,6 +532,18 @@ def run_pipeline(
             event_id=    event_id,
             status=      EventStatus.COMPLETED,
         )
+
+        # Release next queued event if one exists
+        next_event = release_next_queued_event(
+            table_client=       events_client,
+            employee_id=        normalised_payload.employee_id,
+            predecessor_status= EventStatus.COMPLETED,
+        )
+        if next_event:
+            logger.info(
+                f"Next queued event auto-released — employee={normalised_payload.employee_id}, "
+                f"event_id={next_event.event_id}, action={next_event.action}"
+            )
 
         all_reports.append(report)
         _write_report(report, output_dir, result)

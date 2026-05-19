@@ -17,12 +17,19 @@
 #   User creation and lookup
 #   Group membership check and assignment
 #   RBAC role assignment check and creation
+#   PIM group eligibility assignment
 #
 # IDEMPOTENCY:
 #   Every write operation has a paired check operation (e.g.
 #   check_group_membership → add_group_member). The provisioner calls
 #   the check first so the pipeline is safe to retry from the beginning
 #   without creating duplicate users, groups, or role assignments.
+#
+# RETRY LOGIC (GAP-001 remediation):
+#   All Graph API calls are wrapped with @retry_on_throttle.
+#   429 (Too Many Requests) → respects Retry-After header
+#   5xx (Server Error)       → exponential backoff up to 3 retries
+#   4xx (Client Error)       → fails immediately, no retry
 #
 # AUTH:
 #   Local dev  — ClientSecretCredential, reads from local.settings.json.
@@ -33,11 +40,15 @@
 #   User.ReadWrite.All
 #   Group.ReadWrite.All
 #   RoleManagement.ReadWrite.Directory
+#   PrivilegedAccess.ReadWrite.AzureADGroup (Phase 2 PIM)
 
 import asyncio
 import logging
 import os
+import time
 from dataclasses import dataclass
+from functools import wraps
+
 
 from azure.identity import ClientSecretCredential, DefaultAzureCredential
 from msgraph.graph_service_client import GraphServiceClient
@@ -65,6 +76,163 @@ class UserNotFoundError(GraphClientError):
     without parsing exception messages.
     """
     pass
+
+
+class GraphThrottlingError(GraphClientError):
+    """
+    Raised when Graph API throttling (429) persists after all retries.
+    Kept separate so the provisioner can distinguish throttling failures
+    from other transient or permanent errors.
+    """
+    pass
+
+
+def retry_on_throttle(max_retries: int = 3, base_backoff: float = 2.0):
+    """
+    Decorator that wraps Graph API calls with retry logic for transient failures.
+
+    Retry strategy:
+        429 (Too Many Requests) → respect Retry-After header, up to max_retries
+        5xx (Server Error)      → exponential backoff (2^attempt * base_backoff seconds)
+        4xx (Client Error)      → fail immediately, no retry (except 429)
+        Other exceptions        → exponential backoff, treat as transient
+
+    The decorator extracts status codes from several possible exception shapes:
+        - msgraph SDK exceptions with .status_code
+        - httpx.HTTPStatusError with .response.status_code
+        - Exception messages containing "429" or "503"
+
+    Usage:
+        @retry_on_throttle(max_retries=3, base_backoff=2.0)
+        def _some_graph_call(self):
+            return self._run(self._client.users.get())
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+
+                except Exception as e:
+                    last_exception = e
+                    status_code = _extract_status_code(e)
+
+                    # 429 — Respect Retry-After header
+                    if status_code == 429:
+                        retry_after = _extract_retry_after(e)
+                        if attempt < max_retries - 1:
+                            logger.warning(
+                                f"Graph API throttled (429) on attempt {attempt + 1}/{max_retries} "
+                                f"— retrying after {retry_after}s — {func.__name__}"
+                            )
+                            time.sleep(retry_after)
+                            continue
+                        else:
+                            # Max retries exhausted on throttling
+                            raise GraphThrottlingError(
+                                f"Graph API throttling persisted after {max_retries} attempts: {e}"
+                            )
+
+                    # 5xx — Exponential backoff
+                    if status_code and 500 <= status_code < 600:
+                        if attempt < max_retries - 1:
+                            backoff = base_backoff * (2 ** attempt)
+                            logger.warning(
+                                f"Graph API server error ({status_code}) on attempt {attempt + 1}/{max_retries} "
+                                f"— retrying after {backoff}s — {func.__name__}"
+                            )
+                            time.sleep(backoff)
+                            continue
+                        else:
+                            # Max retries exhausted on 5xx
+                            raise GraphClientError(
+                                f"Graph API server error persisted after {max_retries} attempts: {e}"
+                            )
+
+                    # 4xx (except 429) — Permanent client error, no retry
+                    if status_code and 400 <= status_code < 500 and status_code != 429:
+                        logger.error(
+                            f"Graph API client error ({status_code}) — no retry — {func.__name__}: {e}"
+                        )
+                        raise
+
+                    # Other exceptions — treat as transient, exponential backoff
+                    if attempt < max_retries - 1:
+                        backoff = base_backoff * (2 ** attempt)
+                        logger.warning(
+                            f"Graph API transient error on attempt {attempt + 1}/{max_retries} "
+                            f"— retrying after {backoff}s — {func.__name__}: {e}"
+                        )
+                        time.sleep(backoff)
+                        continue
+                    else:
+                        # Max retries exhausted on unknown transient error
+                        raise
+
+            # If we exit the loop without returning, raise the last exception
+            raise last_exception
+
+        return wrapper
+    return decorator
+
+
+def _extract_status_code(exception: Exception) -> int | None:
+    """
+    Extract HTTP status code from various exception shapes.
+
+    The msgraph SDK, httpx, and aiohttp all raise exceptions with
+    different attribute names. This function normalises them.
+    """
+    # msgraph SDK exceptions
+    if hasattr(exception, 'status_code'):
+        return exception.status_code
+
+    # httpx.HTTPStatusError
+    if hasattr(exception, 'response') and hasattr(exception.response, 'status_code'):
+        return exception.response.status_code
+
+    # Fall back to string matching for "429" or "503" in exception message
+    exc_str = str(exception).lower()
+    if "429" in exc_str or "too many requests" in exc_str:
+        return 429
+    if "503" in exc_str or "service unavailable" in exc_str:
+        return 503
+    if "502" in exc_str or "bad gateway" in exc_str:
+        return 502
+
+    return None
+
+
+def _extract_retry_after(exception: Exception) -> int:
+    """
+    Extract Retry-After value from a 429 response.
+
+    Graph API returns this as an HTTP header. The SDK may expose it via
+    exception attributes or headers dict. If not found, default to 60 seconds.
+    """
+    # Check for headers dict on the exception
+    if hasattr(exception, 'headers') and exception.headers:
+        retry_after = exception.headers.get('Retry-After') or exception.headers.get('retry-after')
+        if retry_after:
+            try:
+                return int(retry_after)
+            except (ValueError, TypeError):
+                pass
+
+    # Check for response object with headers
+    if hasattr(exception, 'response') and hasattr(exception.response, 'headers'):
+        retry_after = exception.response.headers.get('Retry-After') or exception.response.headers.get('retry-after')
+        if retry_after:
+            try:
+                return int(retry_after)
+            except (ValueError, TypeError):
+                pass
+
+    # Default to 60 seconds if Retry-After header is missing
+    return 60
 
 
 def build_graph_client() -> tuple:
@@ -103,12 +271,13 @@ class JmlGraphClient:
     via _run() so the provisioner stays simple and linear — no async/await
     anywhere outside this class.
 
-    All methods raise GraphClientError (or its subclass UserNotFoundError)
-    on failure. The provisioner catches these and records which step failed
-    without needing to know anything about the underlying SDK.
+    All methods raise GraphClientError (or its subclasses UserNotFoundError,
+    GraphThrottlingError) on failure. The provisioner catches these and records
+    which step failed without needing to know anything about the underlying SDK.
 
     Construct via:
-        client = JmlGraphClient(build_graph_client())
+        graph_service_client, credential = build_graph_client()
+        client = JmlGraphClient(graph_service_client, credential)
     """
 
     def __init__(self, graph_client: GraphServiceClient, credential=None) -> None:
@@ -133,7 +302,7 @@ class JmlGraphClient:
             finally:
                 loop.close()
 
-
+    @retry_on_throttle(max_retries=3, base_backoff=2.0)
     def get_user(self, upn: str) -> dict:
         """
         Retrieve a user from Entra ID by UPN.
@@ -184,6 +353,7 @@ class JmlGraphClient:
                 raise UserNotFoundError(f"User not found: {upn}")
             raise GraphClientError(f"get_user failed for {upn}: {e}")
 
+    @retry_on_throttle(max_retries=3, base_backoff=2.0)
     def create_user(self, payload) -> dict:
         """
         Create a new Entra ID user from a canonical IdentityPayload.
@@ -214,14 +384,13 @@ class JmlGraphClient:
             user.department          = payload.department
             user.employee_id         = payload.employee_id
             user.usage_location      = "GB"  # Required for M365 license assignment
-            user.employee_type        = payload.employment_type.value #
+            user.employee_type       = payload.employment_type.value
+
             password_profile                                  = PasswordProfile()
             password_profile.password                         = temp_password
             password_profile.force_change_password_next_sign_in = True
             user.password_profile                             = password_profile
-             # Without this, Get-UserSnapshot returns null EmployeeType and
-             # ENT-001/ENT-002 cannot evaluate group membership against policy.
-            user.employee_type        = payload.employment_type.value
+
             created = self._run(self._client.users.post(user))
 
             # Guard against a silent Graph API failure — the SDK can return None
@@ -243,6 +412,7 @@ class JmlGraphClient:
         except Exception as e:
             raise GraphClientError(f"create_user failed for {payload.upn}: {e}")
 
+    @retry_on_throttle(max_retries=3, base_backoff=2.0)
     def get_group(self, group_id: str) -> dict:
         """
         Retrieve a group by object ID.
@@ -271,6 +441,7 @@ class JmlGraphClient:
         except Exception as e:
             raise GraphClientError(f"get_group failed for {group_id}: {e}")
 
+    @retry_on_throttle(max_retries=3, base_backoff=2.0)
     def check_group_membership(self, user_id: str, group_id: str) -> bool:
         """
         Return True if the user is already a member of the group.
@@ -295,6 +466,7 @@ class JmlGraphClient:
                 f"check_group_membership failed — user={user_id}, group={group_id}: {e}"
             )
 
+    @retry_on_throttle(max_retries=3, base_backoff=2.0)
     def add_group_member(self, user_id: str, group_id: str) -> None:
         """
         Add a user to an Entra ID group.
@@ -320,6 +492,7 @@ class JmlGraphClient:
                 f"add_group_member failed — user={user_id}, group={group_id}: {e}"
             )
 
+    @retry_on_throttle(max_retries=3, base_backoff=2.0)
     def check_rbac_assignment(
         self,
         user_id: str,
@@ -350,6 +523,7 @@ class JmlGraphClient:
         except Exception as e:
             raise GraphClientError(f"check_rbac_assignment failed — user={user_id}: {e}")
 
+    @retry_on_throttle(max_retries=3, base_backoff=2.0)
     def create_rbac_assignment(
         self,
         user_id: str,
@@ -389,6 +563,7 @@ class JmlGraphClient:
         except Exception as e:
             raise GraphClientError(f"create_rbac_assignment failed — user={user_id}: {e}")
 
+    @retry_on_throttle(max_retries=3, base_backoff=2.0)
     def assign_pim_group_eligibility(
         self,
         user_id:       str,
@@ -479,7 +654,6 @@ class JmlGraphClient:
                 f"assign_pim_group_eligibility failed — "
                 f"user={user_id}, group={group_id}: {e}"
             )
-
 
 
 def _generate_temp_password(employee_id: str) -> str:

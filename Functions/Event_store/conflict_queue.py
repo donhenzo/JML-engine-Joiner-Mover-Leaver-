@@ -149,7 +149,7 @@ def release_next_queued_event(
 
 
 
-# Internal helpers — not part of the public interface
+# Internal helpers
 def _get_active_events(
     client,
     employee_id: str,

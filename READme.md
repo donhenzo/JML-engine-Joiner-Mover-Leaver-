@@ -32,7 +32,7 @@ This creates three compounding failure modes:
 
 **Low-code workflow tooling**: such as Microsoft Entra ID Lifecycle Workflows is optimised for rapid deployment and operational orchestration. However, it lacks a centralised policy evaluation layer. Decision logic is distributed across workflows, group rules, and role assignments, making complex access decisions difficult to reason about, test, and audit consistently. While attribute-based rules can be implemented, they become fragmented and difficult to maintain at scale. Audit logs capture events, but not structured policy decisions, which limits the ability to reconstruct why a specific access outcome occurred.
 
-**Manual provisioning**:  IT ticket-based workflows fails not because people make mistakes, but because they introduce structural inconsistency. Policy lives in the mind of the engineer processing the ticket. It cannot be tested, versioned, or audited in any meaningful way.
+**Manual provisioning**: IT ticket-based workflows fails not because people make mistakes, but because they introduce structural inconsistency. Policy lives in the mind of the engineer processing the ticket. It cannot be tested, versioned, or audited in any meaningful way.
 
 **Post-provision validation**: running compliance scans after identities are created addresses the symptom rather than the cause. The incorrectly provisioned identity already exists. Remediating it requires additional work, additional audit entries, and in some cases, a formal incident record.
 
@@ -44,7 +44,7 @@ None of these approaches treat access correctness as a provisioning prerequisite
 
 This engine is not a replacement for identity platforms such as Microsoft Entra ID or governance suites like SailPoint IdentityIQ or Saviynt Identity Cloud.
 
-It operates as a policy enforcement layer that sits between HR systems and identity platforms, ensuring that all provisioning requests are policy-compliant before execution. The focus is on the decision layer how access entitlements are computed, validated, and recorded rather than on directory management or access request workflows.
+It operates as a policy enforcement layer that sits between HR systems and identity platforms, ensuring that all provisioning requests are policy-compliant before execution. The focus is on the decision layer — how access entitlements are computed, validated, and recorded — rather than on directory management or access request workflows.
 
 ---
 
@@ -73,10 +73,10 @@ The governance validation engine evaluates the canonical identity payload agains
 Entitlement decisions are resolved by evaluating externally loaded rule objects against the canonical identity payload. Adding a new role mapping, new job title, new department, new group assignment is a configuration file edit with no redeployment. Every entitlement decision is traceable to a named rule ID in the audit report.
 
 **Employment Type Enforcement**
-The engine enforces employment type constraints at the payload level. Contractors and Interns cannot be provisioned into management-tier or privileged groups. This check runs in the pre-provision gate against the payload itself, the user is never created if the combination violates policy.
+The engine enforces employment type constraints at the payload level. Contractors and Interns cannot be provisioned into management-tier or privileged groups. This check runs in the pre-provision gate against the payload itself — the user is never created if the combination violates policy.
 
 **Canonical Normalisation Layer**
-Raw HR field values, variant spellings, case differences, abbreviations are resolved to canonical values before any downstream component sees them. Unknown values route to the hold queue, not to provisioning. Policy changes to the canonical lookup require no code changes.
+Raw HR field values — variant spellings, case differences, abbreviations — are resolved to canonical values before any downstream component sees them. Unknown values route to the hold queue, not to provisioning. Policy changes to the canonical lookup require no code changes.
 
 **Deterministic Idempotency**
 The EventId is a SHA-256 hash of EmployeeId, Action, and StartDate. The same input always produces the same ID. Processing the same CSV twice produces one outcome. Function retries resolve safely without double-provisioning.
@@ -85,10 +85,13 @@ The EventId is a SHA-256 hash of EmployeeId, Action, and StartDate. The same inp
 Records that fail normalisation or validation are not discarded. They enter a formal state machine with explicit transitions, reason codes, retry counts, and a manual release path. Every held record is explainable and actionable.
 
 **Immutable Per-Identity Audit Reports**
-Every lifecycle event produces a structured JSON report regardless of outcome - pass, hold, or fail. Reports capture every action taken, every gate result, every rule ID that fired, and every failure reason. Each report provides full decision traceability, linking every provisioning outcome to the exact rule set and evaluation path that produced it. One file per identity event, written at the time of processing, never modified.
+Every lifecycle event produces a structured JSON report regardless of outcome — pass, hold, or fail. Reports capture every action taken, every gate result, every rule ID that fired, and every failure reason. Each report provides full decision traceability, linking every provisioning outcome to the exact rule set and evaluation path that produced it. One file per identity event, written at the time of processing, never modified.
 
 **Post-Provision Validation**
-After provisioning completes, the validation engine re-runs against the real Entra ID object to confirm the provisioned state matches the expected entitlements. This uses a targeted O(1) Graph API path, three calls regardless of tenant size  rather than a full tenant scan. This design prioritises deterministic validation speed at the pre-provision stage, at the cost of deferring entitlement-state validation to the post-provision gate.
+After provisioning completes, the validation engine re-runs against the real Entra ID object to confirm the provisioned state matches the expected entitlements. This uses a targeted Graph API path — three calls regardless of tenant size — rather than a full tenant scan.
+
+**Graph API Throttling Recovery**
+All Graph API calls are wrapped with automatic retry logic. HTTP 429 responses respect the `Retry-After` header and retry up to three times before failing. Server errors (5xx) use exponential backoff. Client errors (4xx) fail immediately without retry.
 
 ---
 
@@ -98,7 +101,7 @@ After provisioning completes, the validation engine re-runs against the real Ent
 Access is derived from validated identity attributes against a declarative policy. No speculative or convenience-based group assignments. Entitlements are the minimum required for the role and employment type.
 
 **Separation of Duties**
-The policy rule set enforces employment type constraints across privilege tiers. Contractors cannot hold Manager-tier group memberships. The engine enforces this structurally, it is not dependent on human review.
+The policy rule set enforces employment type constraints across privilege tiers. Contractors cannot hold Manager-tier group memberships. The engine enforces this structurally — it is not dependent on human review.
 
 **Governance Before Access**
 Provisioning is conditional on governance validation. The pre-provision gate is a hard block, not a recommendation. This closes the window of incorrect access that post-hoc validation leaves open.
@@ -130,20 +133,20 @@ The pipeline is linear and strictly sequenced. No record reaches provisioning wi
 └─────────────────────────────┬───────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────────┐
-│               PRE-PROVISION VALIDATION GATE ◄── MUST PASS       │
-│   Identity Governance Validation Engine (PowerShell)            │
-│   27 rules evaluated against canonical payload                  │
-│   ENT-004: Contractor/Intern in Manager-tier role → blocked     │
-│   Zero Graph API calls — no Entra object exists yet             │
-│   Failures → Hold Queue (ValidationFailed)                      │
+│                       EVENT STORE                               │
+│   Azure Table Storage — JmlEvents table                         │
+│   SHA-256 deterministic EventId · claim_event() idempotency gate│
+│   Duplicate EventId → exit cleanly (no wasted work downstream)  │
+│   Stale lock detection — auto-reclaim if locked > 10 minutes    │
+│   Status: Pending → Processing → Completed / Failed             │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────────┐
-│                     EVENT STORE                                 │
-│   Azure Table Storage — JmlEvents table                         │
-│   SHA-256 deterministic EventId · Optimistic concurrency        │
-│   Status: Pending → Processing → Completed / Failed             │
-│   Duplicate EventId → exit cleanly (idempotent)                 │
+│                     CONFLICT QUEUE                              │
+│   Check for active events on same EmployeeId                    │
+│   Active event exists → queue new event (FIFO per identity)     │
+│   Leaver arrives → supersede all pending events, claim directly │
+│   No conflict → proceed to entitlement resolution               │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────────┐
@@ -155,11 +158,29 @@ The pipeline is linear and strictly sequenced. No record reaches provisioning wi
 └─────────────────────────────┬───────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────────┐
+│               PRE-PROVISION VALIDATION GATE ◄── MUST PASS       │
+│   Identity Governance Validation Engine (PowerShell)            │
+│   27 rules evaluated against canonical payload                  │
+│   ENT-004: Contractor/Intern in Manager-tier role → blocked     │
+│   Zero Graph API calls — no Entra object exists yet             │
+│   Failures → Hold Queue (ValidationFailed)                      │
+└─────────────────────────────┬───────────────────────────────────┘
+                              │
+┌─────────────────────────────▼───────────────────────────────────┐
+│                    LOCK ACQUISITION                             │
+│   Acquire processing lock (LockedAt + LockedBy instance ID)     │
+│   Prevents concurrent processing of same identity               │
+│   10-minute stale lock timeout with automatic reclaim           │
+└─────────────────────────────┬───────────────────────────────────┘
+                              │
+┌─────────────────────────────▼───────────────────────────────────┐
 │              GRAPH API PROVISIONING LAYER                       │
 │   Create Entra ID user (with employeeType written to Graph)     │
 │   Assign security groups  (SG_*, LIC_*, CA_*)                   │
 │   Assign Azure RBAC roles via group membership                  │
 │   All operations idempotent · ActionsTaken recorded live        │
+│   429 throttling: automatic retry with Retry-After backoff      │
+│   5xx errors: exponential backoff · 4xx errors: fail immediate  │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────────┐
@@ -174,9 +195,16 @@ The pipeline is linear and strictly sequenced. No record reaches provisioning wi
 ┌─────────────────────────────▼───────────────────────────────────┐
 │             POST-PROVISION VALIDATION GATE                      │
 │   Validation engine re-runs against actual Entra ID state       │
-│   Get-UserSnapshot: 3 Graph calls, O(1) regardless of scale     │
+│   Get-UserSnapshot: 3 Graph calls, O(groups for this user)      │
 │   Confirms provisioned state matches expected entitlements      │
 │   ENT-002: Contractor in Manager-tier group → event failed      │
+└─────────────────────────────┬───────────────────────────────────┘
+                              │
+┌─────────────────────────────▼───────────────────────────────────┐
+│                  LOCK RELEASE & QUEUE DRAIN                     │
+│   Release processing lock · mark event Completed or Failed      │
+│   Predecessor succeeded → auto-release next queued event        │
+│   Predecessor failed → hold next queued event for manual review │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────────┐
@@ -187,6 +215,8 @@ The pipeline is linear and strictly sequenced. No record reaches provisioning wi
 │   Immutable · one file per identity event                       │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+Every failure path is handled explicitly. A structural parse failure, a normalisation failure, a validation failure, or a partial provisioning failure each route to a defined state in the hold queue or event store — with a recorded reason that an operator can inspect and act on.
 
 ---
 
@@ -220,13 +250,13 @@ The validation engine evaluates 27 rules across six categories. Rules are declar
 | Identity | IDENT-001/002/003 · JOIN-001/002 | IDENT-001/002 · JOIN-001/002 |
 | Access | ACCESS-001/002/003 · ENT-001/002/003/004 | ACCESS-002 · ENT-002 · ENT-004 |
 | Architecture | ARCH-001/002/003 | ARCH-001 |
-| Hygiene | HYG-001/002/003/004 | HYG-004 (FullScan) |
+| Hygiene | HYG-001/002/003/004 | HYG-004 (FullScan · demoted in PostProvision) |
 | RBAC | RBAC-001/002/003 | RBAC-003 |
 | Correlation | CORR-001/002/003/004/005 | CORR-001/002/003 |
 
-**ENT-004** is the pre-provision payload check, it evaluates employment type against job title before any Entra object exists. Contractors and Interns attempting to be provisioned into Manager, Director, HOD, or Executive roles are blocked at this gate.
+**ENT-004** is the pre-provision payload check. It evaluates employment type against job title before any Entra object exists. Contractors and Interns attempting to be provisioned into Manager, Director, HOD, or Executive roles are blocked at this gate.
 
-**ENT-002** is the post-provision entitlement check, it evaluates actual group memberships against the entitlement model's `allowedEmployment` policy after provisioning completes.
+**ENT-002** is the post-provision entitlement check. It evaluates actual group memberships against the entitlement model's `allowedEmployment` policy after provisioning completes.
 
 ### Employment Type Vocabulary
 
@@ -242,7 +272,29 @@ The same CSV processed twice produces the same EventId. Azure Table Storage inse
 
 ### Concurrency Control
 
-A processing lock is written to the event row at the start of each run (`LockedAt`, `LockedBy`). Stale lock timeout is 10 minutes — if a function instance crashes, the lock auto-releases. Concurrent function instances processing the same event exit cleanly on the lock check.
+A processing lock is written to the event row at the start of each run (`LockedAt`, `LockedBy`). Stale lock timeout is 10 minutes — if a function instance crashes, the lock is automatically reclaimed and the event reset to Pending so the next run can process it. Concurrent function instances processing the same event exit cleanly on the lock check.
+
+### FIFO Conflict Queue
+
+When a new event arrives for an identity that already has an active event in progress, the new event is queued automatically rather than held for human review. The queue is per-identity and ordered by arrival timestamp.
+
+When a predecessor event completes:
+- **Succeeded** → next queued event is auto-released to Pending for processing
+- **Failed** → next queued event is held for manual review (identity may be in partial state)
+
+Leaver events always take priority — when a Leaver arrives, all pending events for that identity are superseded and the Leaver claims the queue immediately.
+
+### Graph API Throttling Recovery
+
+All Graph API calls are wrapped with `@retry_on_throttle`:
+
+```
+429 (Too Many Requests) → respect Retry-After header → retry up to 3 times
+5xx (Server Error)      → exponential backoff (2^attempt × 2s) → retry up to 3 times
+4xx (Client Error)      → fail immediately, no retry
+```
+
+If throttling persists after all retries, `GraphThrottlingError` is raised and the event is marked Failed for operator review. The audit report records the failure step.
 
 ### PIM Eligible Role Assignment (Phase 2)
 
@@ -256,7 +308,7 @@ PIM Security Group (e.g. SG_PIM_IT_UserAdmin)
 User (provisioned by JML engine)
 ```
 
-The user activates their group membership via PIM when they need the role. On activation they temporarily inherit the group's eligible Entra role. On deactivation or expiry the role is removed automatically. The engine never touches Entra role definitions directly it only manages eligible group membership.
+The user activates their group membership via PIM when they need the role. On activation they temporarily inherit the group's eligible Entra role. On deactivation or expiry the role is removed automatically. The engine never touches Entra role definitions directly — it only manages eligible group membership.
 
 **How it integrates with the mapping rules:**
 
@@ -303,7 +355,7 @@ The original post-provision path used `Get-IdentitySnapshot` — full tenant col
 2. `GET /users/{id}/memberOf` — fetch their group memberships directly
 3. `GET /groups/{id}` per membership — resolve display names
 
-Runtime dropped from 60+ seconds (timeout) to approximately 12 seconds end-to-end, with the Graph calls themselves completing in under 2 seconds.
+Runtime dropped from consistent 60-second timeouts to approximately 12 seconds end-to-end.
 
 ### Audit Report Structure
 
@@ -368,6 +420,14 @@ The engine provisions into standardised groups only. Legacy groups are never ass
 
 **Pre-provision validation evaluates payload, not entitlements.** ENT-004 catches employment type and job title conflicts at the payload level. ENT-002 catches group membership conflicts at the post-provision level. Between the two gates there is a window where provisioning runs — if a mapping rule produces an entitlement that would violate policy, the post-provision gate catches it but the user object is created. The design decision was to keep the pre-provision gate fast (zero Graph calls) and the post-provision gate complete.
 
+**No automatic rollback on partial provisioning failure.** Provisioning is a multi-step operation (create user → assign groups → assign RBAC → assign PIM). If a step fails mid-sequence, previously completed steps remain in Entra ID. The user exists with partial access until retry completes. All Graph operations are idempotent, so retry from the beginning is safe and will complete the provisioning sequence. This design accepts partial state as a transient condition between failure and successful retry, rather than implementing compensating transactions (delete user, remove groups) which could themselves fail and leave the system in a worse state.
+
+**No batch size limit enforced on CSV input.** The pipeline processes all valid rows in a single run with no maximum batch size or rate limiting between records. Large batches (>500 identities) may encounter Graph API throttling or Azure Function timeout limits even with retry logic in place. Recommended approach: split large onboarding waves into batches of 100-200 records, or implement a queue-based architecture where CSV parsing writes to Azure Queue Storage and a separate function processes events one at a time with natural backpressure.
+
+**Queued events require a new pipeline run to drain.** When a queued event is auto-released (predecessor completes), it transitions to Status: Pending with QueuedAt cleared, but nothing picks it up until the next CSV run or a manual trigger. In production, a timer-triggered function should scan for released events on a schedule and process them automatically.
+
+**Schema versioning not implemented.** The `IdentityPayload` dataclass has no version field. Events stored in the Event Store cannot be safely deserialized if the schema changes in a breaking way (new required fields, changed enum values). A versioned deserializer is required before any breaking schema migration is deployed.
+
 **Policy complexity scales with the mapping rule set.** As the number of departments, job titles, and employment types grows, the `Rules.json` entitlement model grows with it. Without a role abstraction layer (planned), HR title changes require mapping rule updates.
 
 **HR API integration is polling-based, not webhook-driven.** The engine pulls from BambooHR via delta polling and processes changes since the last checkpoint. Live webhook integration is the planned next step — `run_single()` is already the atomic unit, so a webhook handler requires no pipeline changes, only a new HTTP trigger entry point.
@@ -386,20 +446,6 @@ The engine provisions into standardised groups only. Legacy groups are never ass
 | Phase 3 | Mover — delta calculation, permission recalibration, RetainList support | Designed, not started |
 | Phase 4 | Leaver — full revocation, session termination, M365/app removal | Designed, not started |
 
-
----
-
-## Premium Licence Dependencies
-
-| Feature | Licence | Required From |
-|---|---|---|
-| Core provisioning (users, groups, RBAC) | Entra ID Free | Phase 0–1 |
-| Dynamic membership rules | Entra ID P1 | Phase 1 (optional enhancement) |
-| Privileged Identity Management (PIM) | Entra ID P2 | Phase 2 ✓ |
-
-The core engine requires no premium licensing. Premium features are additive layers.
-
----
 ---
 
 ## HR API Integration
@@ -470,6 +516,20 @@ Ingestion/hr_api/
 └── ingestion_coordinator.py  # Orchestrates fetch · derive · pipeline · checkpoint
 ```
 
+---
+
+## Premium Licence Dependencies
+
+| Feature | Licence | Required From |
+|---|---|---|
+| Core provisioning (users, groups, RBAC) | Entra ID Free | Phase 0–1 |
+| Dynamic membership rules | Entra ID P1 | Phase 1 (optional enhancement) |
+| Privileged Identity Management (PIM) | Entra ID P2 | Phase 2 ✓ |
+
+The core engine requires no premium licensing. Premium features are additive layers.
+
+---
+
 ## Running Locally
 
 ```bash
@@ -479,7 +539,7 @@ pip install -r requirements.txt
 # Terminal 1 — start the PowerShell validation engine
 cd Validation_engine
 func start
-# Wait for: Host lock lease acquired by instance ID. 
+# Wait for: Host lock lease acquired by instance ID.
 
 # Terminal 2 — CSV mode (original)
 cd JML-engine
@@ -507,8 +567,8 @@ JML-Engine/
 │   ├── joiner_http/
 │   │   └── __init__.py              # Azure Function HTTP trigger · run_pipeline()
 │   └── Event_store/
-│       ├── event_store.py           # SHA-256 EventId · claim_event() · lock management
-│       └── conflict_queue.py        # Conflicting event FIFO queue
+│       ├── event_store.py           # SHA-256 EventId · claim_event() · stale lock recovery
+│       └── conflict_queue.py        # Conflicting event FIFO queue · auto-release on completion
 ├── Ingestion/
 │   ├── csv_parser.py                # CSV ingestion · structural validation
 │   ├── schema.py                    # IdentityPayload · JmlAction · EmploymentType enums
@@ -526,7 +586,7 @@ JML-Engine/
 │   ├── mapping_loader.py            # Loads role_mapping_rules.json from Azure Storage
 │   └── mapping_resolver.py          # Evaluates rules against identity payload
 ├── Provisioning/
-│   ├── graph_client.py              # Microsoft Graph API client · writes employeeType to Entra · PIM HTTP calls
+│   ├── graph_client.py              # Graph API client · retry on 429 · PIM HTTP calls
 │   ├── pim_client.py                # PIM group eligibility assignment · delegates to graph_client
 │   └── provisioner.py               # Entra ID user · group · RBAC · PIM eligibility provisioning
 ├── Validation/
