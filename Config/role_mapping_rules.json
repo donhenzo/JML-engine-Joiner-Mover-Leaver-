@@ -1,379 +1,536 @@
 {
   "rules": [
+
     {
       "id": "RULE-ENG-001",
-      "description": "Engineering — all staff baseline",
+      "description": "Engineering — all staff baseline. Gets Engineering base group.",
       "priority": 100,
       "conditions": {
         "department": { "operator": "exact", "value": "Engineering" }
       },
       "entitlements": {
-        "groups": ["fa63d51b-f81c-4b2b-a658-31f6befe5a49"],
+        "groups": [
+          "8fb6697c-62f7-4ce1-bd9e-0a97d387e00a"
+        ],
         "rbac_roles": []
       }
     },
     {
       "id": "RULE-ENG-002",
-      "description": "Engineering — Software Engineer role",
+      "description": "Engineering — Software Engineer role. Gets Engineering staff group.",
       "priority": 200,
       "conditions": {
         "department": { "operator": "exact", "value": "Engineering" },
         "job_title":  { "operator": "exact", "value": "Software Engineer" }
       },
       "entitlements": {
-        "groups": ["956720f7-8f66-4987-bf47-4998c839ba00"],
+        "groups": [
+          "2ca2ba07-2f64-44a2-9e40-a87d92b9a263"
+        ],
         "rbac_roles": []
       }
     },
     {
       "id": "RULE-ENG-003",
-      "description": "Engineering — Senior Software Engineer role",
+      "description": "Engineering — Senior Software Engineer role. Gets Engineering staff group.",
       "priority": 200,
       "conditions": {
         "department": { "operator": "exact", "value": "Engineering" },
         "job_title":  { "operator": "exact", "value": "Senior Software Engineer" }
       },
       "entitlements": {
-        "groups": ["956720f7-8f66-4987-bf47-4998c839ba00"],
+        "groups": [
+          "2ca2ba07-2f64-44a2-9e40-a87d92b9a263"
+        ],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-ENG-MANAGER",
+      "description": "Engineering Manager — gets Engineering manager group + cross-department manager flag.",
+      "priority": 200,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Engineering" },
+        "job_title":  { "operator": "exact", "value": "Engineering Manager" }
+      },
+      "entitlements": {
+        "groups": [
+          "97978b59-a4b4-42d0-ba52-65e86fe125af",
+          "578fcb68-aa52-4ae0-9d75-5fa232b35ddc"
+        ],
         "rbac_roles": []
       }
     },
     {
       "id": "RULE-SALES-001",
-      "description": "Sales — all staff baseline",
+      "description": "Sales — all staff baseline. Gets Sales base group.",
       "priority": 100,
       "conditions": {
         "department": { "operator": "exact", "value": "Sales" }
       },
       "entitlements": {
-        "groups": ["111fdfb6-1709-4987-8818-b66417d89f91"],
+        "groups": [
+          "71402fbe-d18f-4cee-8377-a6db2d99d29b"
+        ],
         "rbac_roles": []
       }
     },
     {
       "id": "RULE-SALES-002",
-      "description": "Sales — Sales Manager role",
+      "description": "Sales — Sales Manager role. Gets Sales manager group + cross-department manager flag.",
       "priority": 200,
       "conditions": {
         "department": { "operator": "exact", "value": "Sales" },
         "job_title":  { "operator": "exact", "value": "Sales Manager" }
       },
       "entitlements": {
-        "groups": ["0c67c63b-a6e2-4bf6-b4a0-3a860384cf08"],
+        "groups": [
+          "ad6a90bf-76ba-4c63-bd19-97e78cbafa8e",
+          "578fcb68-aa52-4ae0-9d75-5fa232b35ddc"
+        ],
         "rbac_roles": []
       }
     },
     {
       "id": "RULE-HR-001",
-      "description": "Human Resources — all staff baseline",
+      "description": "Human Resources — all staff baseline. Gets HR base group.",
       "priority": 100,
       "conditions": {
         "department": { "operator": "exact", "value": "Human Resources" }
       },
       "entitlements": {
-        "groups": ["3005476d-7190-480a-a23f-ab65f0d2061e"],
+        "groups": [
+          "b4cb07c4-5bdc-48ef-b126-ec2ca497d28a"
+        ],
         "rbac_roles": []
       }
     },
     {
       "id": "RULE-HR-002",
-      "description": "Human Resources — HR Advisor role",
+      "description": "Human Resources — HR Advisor role. Gets HR staff group. SoD duty group: SG_HR_SalaryAdmin (cb01abd7) — advisors manage salary and payroll data. SOD-006 warns if this identity also receives SG_HR_DataExport (b5f4b30d).",
       "priority": 200,
       "conditions": {
         "department": { "operator": "exact", "value": "Human Resources" },
         "job_title":  { "operator": "exact", "value": "HR Advisor" }
       },
       "entitlements": {
-        "groups": ["999749f5-e34a-47ce-be6e-22bba169fce0"],
+        "groups": [
+          "5a429e58-846c-4882-973a-167149a034b4",
+          "cb01abd7-b56d-4bb5-8d2b-e41ca740f7e7"
+        ],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-HR-MANAGER",
+      "description": "Human Resources — HR Manager role. Gets HR manager group + cross-department manager flag. SoD duty group: SG_HR_DataExport (b5f4b30d) — HR managers can bulk export employee data. SOD-006 warns if this identity also receives SG_HR_SalaryAdmin (cb01abd7).",
+      "priority": 200,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Human Resources" },
+        "job_title":  { "operator": "exact", "value": "HR Manager" }
+      },
+      "entitlements": {
+        "groups": [
+          "08ef0327-5e7e-457f-815d-6c36591abd7d",
+          "578fcb68-aa52-4ae0-9d75-5fa232b35ddc",
+          "b5f4b30d-952e-4a86-ba4d-32234f00c814"
+        ],
         "rbac_roles": []
       }
     },
     {
       "id": "RULE-FIN-001",
-      "description": "Finance — all staff baseline",
+      "description": "Finance — all staff baseline. Gets Finance base group.",
       "priority": 100,
       "conditions": {
         "department": { "operator": "exact", "value": "Finance" }
       },
       "entitlements": {
-        "groups": ["8410d4d1-fe60-413f-9d2d-6d33200c6517"],
+        "groups": [
+          "3bf3f73f-f945-4bb4-ac7f-77e27b781f9c"
+        ],
         "rbac_roles": []
       }
     },
     {
       "id": "RULE-FIN-002",
-      "description": "Finance — Finance Analyst role",
+      "description": "Finance — Finance Analyst role. Gets Finance staff group. SoD duty groups: SG_Finance_PaymentProcessors (02d7e0dd) and SG_Finance_JournalPosters (12572599). SOD-001 blocks if this identity also receives SG_Finance_PaymentApprovers. SOD-003 and SOD-005 warn if this identity also receives SG_Finance_Auditors.",
       "priority": 200,
       "conditions": {
         "department": { "operator": "exact", "value": "Finance" },
         "job_title":  { "operator": "exact", "value": "Finance Analyst" }
       },
       "entitlements": {
-        "groups": ["5d33063f-53da-4d01-a87c-1d5f460b840b"],
+        "groups": [
+          "885938dd-cd20-4a69-9f7d-9353393aac31",
+          "02d7e0dd-df9a-4b9f-aa97-492d8bccd480",
+          "12572599-6760-4433-963e-234461095ccc"
+        ],
         "rbac_roles": []
       }
     },
     {
-  "id": "RULE-IT-001",
-  "description": "Information Technology — all staff baseline",
-  "priority": 100,
-  "conditions": {
-    "department": { "operator": "exact", "value": "Information Technology" }
-  },
-  "entitlements": {
-    "groups": ["fc34a451-4897-4139-88e8-6464cd2f4a85"],
-    "rbac_roles": []
-  }
-},
-    {
-      "id": "RULE-EMP-CONTRACTOR",
-      "description": "Employment type — Contractor gets contractor group for their department",
-      "priority": 300,
+      "id": "RULE-FINANCE-HOD",
+      "description": "Head of Finance — finance base, Finance manager group, cross-department manager flag, M365 E5, Finance Addon, CA Privileged, PIM eligible for Global Reader. SoD duty groups: SG_Finance_PaymentApprovers (8ba2677b) and SG_Finance_Auditors (c3b520b3). SOD-004 warns on every HOF provisioning — PaymentApprovers + Auditors is intentional for this role.",
+      "priority": 200,
       "conditions": {
-        "department":       { "operator": "exact", "value": "Engineering" },
-        "employment_type":  { "operator": "exact", "value": "Contractor" }
+        "department": { "operator": "exact", "value": "Finance" },
+        "job_title":  { "operator": "exact", "value": "Head of Finance" }
       },
       "entitlements": {
-        "groups": ["27061e09-c0a4-4cd6-91b3-ddb7714a37bd"],
+        "groups": [
+          "3bf3f73f-f945-4bb4-ac7f-77e27b781f9c",
+          "3fa20450-9319-4cb5-831e-46e0beefc100",
+          "578fcb68-aa52-4ae0-9d75-5fa232b35ddc",
+          "9af7e65e-f082-4913-865b-ebddf63289c9",
+          "e51c62a6-310e-42ac-8785-6c14af99530c",
+          "8ba2677b-0316-4ec2-a8d5-03359f36b433",
+          "c3b520b3-2e66-452c-aa37-ef813ad5b16d"
+        ],
+        "rbac_roles": [],
+        "pimGroups": [
+          {
+            "id":            "bb561f0f-9a70-419d-8472-8e593e2369c6",
+            "displayName":   "SG_PIM_Finance_GlobalReader",
+            "eligibleRole":  "Global Reader",
+            "justification": "Head of Finance requires on-demand read access to tenant-wide audit and compliance data",
+            "durationHours": 8
+          }
+        ]
+      }
+    },
+    {
+      "id": "RULE-IT-001",
+      "description": "Information Technology — all staff baseline. Gets IT base group.",
+      "priority": 100,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Information Technology" }
+      },
+      "entitlements": {
+        "groups": [
+          "21b756d3-1883-4372-b1b2-786d233985db"
+        ],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-IT-SUPPORT",
+      "description": "IT Support Analyst — IT staff group and IT Helpdesk group. SoD duty group: SG_IT_AccessApprovers (9795b324). SOD-002 blocks if this identity also receives SG_IT_UserProvisioners (1668923f).",
+      "priority": 200,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Information Technology" },
+        "job_title":  { "operator": "exact", "value": "IT Support Analyst" }
+      },
+      "entitlements": {
+        "groups": [
+          "8718e89e-4b35-4b1f-83b4-991581e55b0d",
+          "426ec84a-8c8c-4c62-a018-0afa1919b4bb",
+          "9795b324-f724-4ba7-b01f-9735587fbca3"
+        ],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-IT-SECENG",
+      "description": "IT Security Engineer — IT base group and IT staff group.",
+      "priority": 200,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Information Technology" },
+        "job_title":  { "operator": "exact", "value": "IT Security Engineer" }
+      },
+      "entitlements": {
+        "groups": [
+          "21b756d3-1883-4372-b1b2-786d233985db",
+          "8718e89e-4b35-4b1f-83b4-991581e55b0d"
+        ],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-IT-MANAGER",
+      "description": "IT Manager — IT base, IT manager group, cross-department manager flag, M365 E5, CA Privileged, PIM eligible for User Administrator. SoD duty group: SG_IT_UserProvisioners (1668923f). SOD-002 blocks if this identity also receives SG_IT_AccessApprovers (9795b324).",
+      "priority": 200,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Information Technology" },
+        "job_title":  { "operator": "exact", "value": "IT Manager" }
+      },
+      "entitlements": {
+        "groups": [
+          "21b756d3-1883-4372-b1b2-786d233985db",
+          "0cdb89d3-8924-4bf3-8e3b-02431541c2ed",
+          "578fcb68-aa52-4ae0-9d75-5fa232b35ddc",
+          "a2f8d18e-8e47-4935-8a96-e66840c07793",
+          "9af7e65e-f082-4913-865b-ebddf63289c9",
+          "1668923f-57f6-4fc0-8ba0-bc698b3e17e8"
+        ],
+        "rbac_roles": [],
+        "pimGroups": [
+          {
+            "id":            "bcbd36bc-36e5-40f0-82e1-58270df9720d",
+            "displayName":   "SG_PIM_IT_UserAdmin",
+            "eligibleRole":  "User Administrator",
+            "justification": "IT Manager requires on-demand user administration access for provisioning and helpdesk operations",
+            "durationHours": 8
+          }
+        ]
+      }
+    },
+    {
+      "id": "RULE-IT-DIRECTOR",
+      "description": "Director of IT — Head of IT. IT base, IT manager group, cross-department manager flag, M365 E5, CA Privileged. Same manager-tier groups as IT Manager — Director of IT is the head of the IT function.",
+      "priority": 200,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Information Technology" },
+        "job_title":  { "operator": "exact", "value": "Director of IT" }
+      },
+      "entitlements": {
+        "groups": [
+          "21b756d3-1883-4372-b1b2-786d233985db",
+          "0cdb89d3-8924-4bf3-8e3b-02431541c2ed",
+          "578fcb68-aa52-4ae0-9d75-5fa232b35ddc",
+          "a2f8d18e-8e47-4935-8a96-e66840c07793",
+          "9af7e65e-f082-4913-865b-ebddf63289c9"
+        ],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-SECURITY-HOD",
+      "description": "Security HOD — Security base, Security HOD group, cross-department manager flag, M365 E5, Security Addon, CA Privileged, PIM eligible for Security Administrator.",
+      "priority": 200,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Security" },
+        "job_title":  { "operator": "exact", "value": "Security HOD" }
+      },
+      "entitlements": {
+        "groups": [
+          "3088c800-cf21-4c25-b3b5-a3365c8f2319",
+          "b3f78d94-df4f-4be0-8e27-a909a5b989cc",
+          "578fcb68-aa52-4ae0-9d75-5fa232b35ddc",
+          "a2f8d18e-8e47-4935-8a96-e66840c07793",
+          "e868061d-33e4-4a48-807d-4244710f7864",
+          "9af7e65e-f082-4913-865b-ebddf63289c9"
+        ],
+        "rbac_roles": [],
+        "pimGroups": [
+          {
+            "id":            "47a8c412-2dd8-4e41-ab10-baac977b50fc",
+            "displayName":   "SG_PIM_Security_Admin",
+            "eligibleRole":  "Security Administrator",
+            "justification": "Security HOD requires on-demand administrative access for incident response and policy enforcement",
+            "durationHours": 4
+          }
+        ]
+      }
+    },
+    {
+      "id": "RULE-EMP-CONTRACTOR-ENG",
+      "description": "Employment type — Engineering Contractor. Gets Engineering contractor group + cross-department contractor flag.",
+      "priority": 300,
+      "conditions": {
+        "department":      { "operator": "exact", "value": "Engineering" },
+        "employment_type": { "operator": "exact", "value": "Contractor" }
+      },
+      "entitlements": {
+        "groups": [
+          "4420fe50-dcc0-45bc-9556-e6981bb82afa",
+          "4e5cb747-191d-49e1-a2f5-9a47081378ef"
+        ],
         "rbac_roles": []
       }
     },
     {
       "id": "RULE-EMP-CONTRACTOR-HR",
-      "description": "Employment type — HR Contractor",
+      "description": "Employment type — HR Contractor. Gets cross-department contractor flag.",
       "priority": 300,
       "conditions": {
         "department":      { "operator": "exact", "value": "Human Resources" },
         "employment_type": { "operator": "exact", "value": "Contractor" }
       },
       "entitlements": {
-        "groups": ["889ab9db-381e-4bc3-a222-fad441d4cbe0"],
+        "groups": [
+          "4e5cb747-191d-49e1-a2f5-9a47081378ef"
+        ],
         "rbac_roles": []
       }
     },
     {
       "id": "RULE-EMP-CONTRACTOR-IT",
-      "description": "Employment type — IT Contractor",
+      "description": "Employment type — IT Contractor. Gets cross-department contractor flag.",
       "priority": 300,
       "conditions": {
         "department":      { "operator": "exact", "value": "Information Technology" },
         "employment_type": { "operator": "exact", "value": "Contractor" }
       },
       "entitlements": {
-        "groups": ["1d856a92-5b08-4527-8a17-83aca9f97af1"],
+        "groups": [
+          "4e5cb747-191d-49e1-a2f5-9a47081378ef"
+        ],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-EMP-CONTRACTOR-FIN",
+      "description": "Employment type — Finance Contractor. Gets Finance contractor group + cross-department contractor flag.",
+      "priority": 300,
+      "conditions": {
+        "department":      { "operator": "exact", "value": "Finance" },
+        "employment_type": { "operator": "exact", "value": "Contractor" }
+      },
+      "entitlements": {
+        "groups": [
+          "a9e5043b-e21d-406c-b68f-79716913db36",
+          "4e5cb747-191d-49e1-a2f5-9a47081378ef"
+        ],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-EMP-CONTRACTOR-SALES",
+      "description": "Employment type — Sales Contractor. Gets Sales contractor group + cross-department contractor flag.",
+      "priority": 300,
+      "conditions": {
+        "department":      { "operator": "exact", "value": "Sales" },
+        "employment_type": { "operator": "exact", "value": "Contractor" }
+      },
+      "entitlements": {
+        "groups": [
+          "6048c42a-7d65-4f57-a6e0-a33616884ab6",
+          "4e5cb747-191d-49e1-a2f5-9a47081378ef"
+        ],
+        "rbac_roles": []
+      }
+    },
+    {
+      "id": "RULE-EMP-CONTRACTOR-SECURITY",
+      "description": "Employment type — Security Contractor. Gets Security contractor group + cross-department contractor flag.",
+      "priority": 300,
+      "conditions": {
+        "department":      { "operator": "exact", "value": "Security" },
+        "employment_type": { "operator": "exact", "value": "Contractor" }
+      },
+      "entitlements": {
+        "groups": [
+          "9139b763-8b2b-440a-8fa0-a9a492e3701b",
+          "4e5cb747-191d-49e1-a2f5-9a47081378ef"
+        ],
         "rbac_roles": []
       }
     },
     {
       "id": "RULE-CA-EMPLOYEE",
-      "description": "Conditional access — standard employees",
+      "description": "Conditional access — standard employees get CA_Standard_Users policy.",
       "priority": 400,
       "conditions": {
         "employment_type": { "operator": "exact", "value": "Employee" }
       },
       "entitlements": {
-        "groups": ["3e67ae85-f761-46ce-b958-54ec38625736"],
+        "groups": [
+          "c85ea816-060a-4ab4-8c68-f8f4741bd9b2"
+        ],
         "rbac_roles": []
       }
     },
     {
       "id": "RULE-CA-CONTRACTOR",
-      "description": "Conditional access — contractors get restricted policy",
+      "description": "Conditional access — contractors get CA_Contractors restricted policy.",
       "priority": 400,
       "conditions": {
         "employment_type": { "operator": "exact", "value": "Contractor" }
       },
       "entitlements": {
-        "groups": ["081cf46b-806b-449f-a838-98cc0433b5d1"],
+        "groups": [
+          "3e9f0514-0f40-44b9-8ac7-01e782c8085d"
+        ],
         "rbac_roles": []
       }
     },
     {
       "id": "RULE-LIC-E3-ENG",
-      "description": "Licensing — M365 E3 for Engineering",
+      "description": "Licensing — M365 E3 for Engineering.",
       "priority": 500,
       "conditions": {
         "department": { "operator": "exact", "value": "Engineering" }
       },
       "entitlements": {
-        "groups": ["d18f0b08-1ab6-462b-95ff-707c88cc7e0b"],
+        "groups": [
+          "89fe3125-c0ab-4b76-934d-8ddae85d0129"
+        ],
         "rbac_roles": []
       }
     },
     {
       "id": "RULE-LIC-E3-SALES",
-      "description": "Licensing — M365 E3 for Sales",
+      "description": "Licensing — M365 E3 for Sales.",
       "priority": 500,
       "conditions": {
         "department": { "operator": "exact", "value": "Sales" }
       },
       "entitlements": {
-        "groups": ["d18f0b08-1ab6-462b-95ff-707c88cc7e0b"],
+        "groups": [
+          "89fe3125-c0ab-4b76-934d-8ddae85d0129"
+        ],
         "rbac_roles": []
       }
     },
     {
       "id": "RULE-LIC-E3-HR",
-      "description": "Licensing — M365 E3 for Human Resources",
+      "description": "Licensing — M365 E3 for Human Resources.",
       "priority": 500,
       "conditions": {
         "department": { "operator": "exact", "value": "Human Resources" }
       },
       "entitlements": {
-        "groups": ["d18f0b08-1ab6-462b-95ff-707c88cc7e0b"],
+        "groups": [
+          "89fe3125-c0ab-4b76-934d-8ddae85d0129"
+        ],
         "rbac_roles": []
       }
     },
     {
       "id": "RULE-LIC-E3-FIN",
-      "description": "Licensing — M365 E3 for Finance",
+      "description": "Licensing — M365 E3 for Finance.",
       "priority": 500,
       "conditions": {
         "department": { "operator": "exact", "value": "Finance" }
       },
       "entitlements": {
-        "groups": ["d18f0b08-1ab6-462b-95ff-707c88cc7e0b"],
+        "groups": [
+          "89fe3125-c0ab-4b76-934d-8ddae85d0129"
+        ],
         "rbac_roles": []
       }
     },
     {
-  "id": "RULE-LIC-E3-IT",
-  "description": "Licensing — M365 E3 for IT",
-  "priority": 500,
-  "conditions": {
-    "department": { "operator": "exact", "value": "Information Technology" }
-  },
-  "entitlements": {
-    "groups": ["d18f0b08-1ab6-462b-95ff-707c88cc7e0b"],
-    "rbac_roles": []
-  }
-},
+      "id": "RULE-LIC-E3-IT",
+      "description": "Licensing — M365 E3 for Information Technology.",
+      "priority": 500,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Information Technology" }
+      },
+      "entitlements": {
+        "groups": [
+          "89fe3125-c0ab-4b76-934d-8ddae85d0129"
+        ],
+        "rbac_roles": []
+      }
+    },
     {
-  "id": "RULE-ENG-MANAGER",
-  "description": "Engineering Manager — all employment types — Manager group",
-  "priority": 200,
-  "conditions": {
-    "department": { "operator": "exact", "value": "Engineering" },
-    "job_title":  { "operator": "exact", "value": "Engineering Manager" }
-  },
-  "entitlements": {
-    "groups": ["b7bfed9d-4531-4891-8347-1fed3c2f8d36"],
-    "rbac_roles": []
-  }
-}, 
-{
-  "id": "RULE-IT-SECENG",
-  "description": "IT Security Engineer — IT core, E5, standard CA",
-  "priority": 200,
-  "conditions": {
-    "department": { "operator": "exact", "value": "Information Technology" },
-    "job_title": { "operator": "exact", "value": "IT Security Engineer" }
-  },
-  "entitlements": {
-    "groups": ["fc34a451-4897-4139-88e8-6464cd2f4a85"],
-    "rbac_roles": []
-  }
-},
-{
-  "id": "RULE-IT-DIRECTOR",
-  "description": "Director of IT — IT core, manager group, E5, privileged CA",
-  "priority": 200,
-  "conditions": {
-    "department": { "operator": "exact", "value": "Information Technology" },
-    "job_title": { "operator": "exact", "value": "Director of IT" }
-  },
-  "entitlements": {
-    "groups": [
-      "49349779-b40b-4989-af0c-bf2c78c459e1",
-      "5d92e3c8-9d19-46da-b692-26297278084e",
-      "87a64cce-8b63-4b7e-8c1a-703a695ee2cc"
-    ],
-    "rbac_roles": []
-  }
-},
-{
-  "id": "RULE-SECURITY-HOD",
-  "description": "Security HOD — security core, HOD group, E5, Security Addon, CA Privileged, PIM eligible for Security Administrator",
-  "priority": 200,
-  "conditions": {
-    "department": { "operator": "exact", "value": "Security" },
-    "job_title":  { "operator": "exact", "value": "Security HOD" }
-  },
-  "entitlements": {
-    "groups": [
-      "f6daa7ee-7873-4317-8b5b-59a059564fa7",
-      "f67c852c-74bd-4565-8ffc-d54a8da7f18e",
-      "5d92e3c8-9d19-46da-b692-26297278084e",
-      "4e73e839-33a0-49cf-83bc-6b27a32866b5",
-      "87a64cce-8b63-4b7e-8c1a-703a695ee2cc"
-    ],
-    "rbac_roles": [],
-    "pimGroups": [
-      {
-        "id":            "47a8c412-2dd8-4e41-ab10-baac977b50fc",
-        "displayName":   "SG_PIM_Security_Admin",
-        "eligibleRole":  "Security Administrator",
-        "justification": "Security HOD requires on-demand administrative access for incident response and policy enforcement",
-        "durationHours": 4
+      "id": "RULE-LIC-E3-SECURITY",
+      "description": "Licensing — M365 E3 for Security.",
+      "priority": 500,
+      "conditions": {
+        "department": { "operator": "exact", "value": "Security" }
+      },
+      "entitlements": {
+        "groups": [
+          "89fe3125-c0ab-4b76-934d-8ddae85d0129"
+        ],
+        "rbac_roles": []
       }
-    ]
-  }
-},
-{
-  "id": "RULE-IT-MANAGER",
-  "description": "IT Manager — IT core, manager group, E5, CA Privileged, PIM eligible for User Administrator",
-  "priority": 200,
-  "conditions": {
-    "department": { "operator": "exact", "value": "Information Technology" },
-    "job_title":  { "operator": "exact", "value": "IT Manager" }
-  },
-  "entitlements": {
-    "groups": [
-      "fc34a451-4897-4139-88e8-6464cd2f4a85",
-      "49349779-b40b-4989-af0c-bf2c78c459e1",
-      "5d92e3c8-9d19-46da-b692-26297278084e",
-      "87a64cce-8b63-4b7e-8c1a-703a695ee2cc"
-    ],
-    "rbac_roles": [],
-    "pimGroups": [
-      {
-        "id":            "bcbd36bc-36e5-40f0-82e1-58270df9720d",
-        "displayName":   "SG_PIM_IT_UserAdmin",
-        "eligibleRole":  "User Administrator",
-        "justification": "IT Manager requires on-demand user administration access for provisioning and helpdesk operations",
-        "durationHours": 8
-      }
-    ]
-  }
-},
-{
-  "id": "RULE-FINANCE-HOD",
-  "description": "Head of Finance — finance core, manager group, E5, Finance Addon, CA Privileged, PIM eligible for Global Reader",
-  "priority": 200,
-  "conditions": {
-    "department": { "operator": "exact", "value": "Finance" },
-    "job_title":  { "operator": "exact", "value": "Head of Finance" }
-  },
-  "entitlements": {
-    "groups": [
-      "8410d4d1-fe60-413f-9d2d-6d33200c6517",
-      "c2b66a61-cf52-4cf8-b9fe-7557efcf7853",
-      "5d92e3c8-9d19-46da-b692-26297278084e",
-      "ddfd7df2-a436-4f44-b8df-f90b95189958",
-      "87a64cce-8b63-4b7e-8c1a-703a695ee2cc"
-    ],
-    "rbac_roles": [],
-    "pimGroups": [
-      {
-        "id":            "bb561f0f-9a70-419d-8472-8e593e2369c6",
-        "displayName":   "SG_PIM_Finance_GlobalReader",
-        "eligibleRole":  "Global Reader",
-        "justification": "Head of Finance requires on-demand read access to tenant-wide audit and compliance data",
-        "durationHours": 8
-      }
-    ]
-  }
-}
-  ]
+    }, 
+    {
 }
 
+  ]
+}

@@ -6,8 +6,9 @@ Azure Function HTTP trigger for the JML Joiner pipeline.
 WHY THIS EXISTS:
     This is the top-level orchestrator for the Joiner flow. It wires
     every sub script together. CSV ingestion, normalisation, event store,
-    conflict queue, entitlement mapping, validation, provisioning, and
-    audit — into a single ordered sequence for each identity record.
+    conflict queue, entitlement mapping, SoD evaluation, validation,
+    provisioning, and audit — into a single ordered sequence for each
+    identity record.
 
     It is split into two parts so the pipeline logic can run anywhere:
 
@@ -21,22 +22,40 @@ WHY THIS EXISTS:
         module loads cleanly in any Python environment.
 
 FULL SEQUENCE PER RECORD:
-    1.  Parse CSV or HR api input.
+    1.  Parse CSV or HR API input.
     2.  Construct IdentityPayload
     3.  Normalise (department + job_title canonicalisation)
     4.  Check for stale locks — reclaim if >10 minutes old
     5.  Claim event          — idempotency gate, exits on duplicate
     6.  Conflict check       — FIFO queue, parks event if one is active
     7.  Resolve entitlements — mapping rules determine groups + RBAC roles
-    8.  Pre-provision validation gate
-    9.  Acquire lock
-    10. Provision via Graph API
-    11. Post-provision validation
-    12. Release lock + mark event Completed
-    13. Release next queued event (if any)
-    14. Write audit report
+    8.  SoD evaluation       — block or warn on entitlement conflicts
+    9.  Pre-provision validation gate (PowerShell governance engine)
+    10. Acquire lock
+    11. Provision via Graph API
+    12. Post-provision validation
+    13. Release lock + mark event Completed
+    14. Release next queued event (if any)
+    15. Write audit report
 
     One DecisionReport is written per record regardless of outcome.
+
+SoD INTEGRATION NOTES:
+    SoD evaluation runs after entitlement resolution (Step 7) because it
+    needs the full resolved group set to check against the conflict catalogue.
+    It runs before the PowerShell validation gate (Step 9) because:
+        - Both are pre-provision gates — neither touches Entra ID
+        - A SoD block is cheaper to detect here (pure Python, no HTTP call)
+        - The PowerShell gate should not run for records already blocked
+
+    SoD block  → hold queue via create_from_sod_violation() → audit report → stop
+    SoD warn   → violations attached to audit report → continue to Step 9
+    SoD clean  → continue normally
+
+    The sod_policies.json catalogue is loaded once before the record loop,
+    same pattern as role_mapping_rules.json. A failure to load the catalogue
+    is treated as a pipeline-level error — no records are processed without
+    the SoD gate in place. This is fail-closed by design.
 """
 
 from __future__ import annotations
@@ -88,6 +107,15 @@ from Provisioning.provisioner import provision_joiner
 from Provisioning.graph_client import build_graph_client, JmlGraphClient
 from Audit.run_summary_writer import write_run_summary
 
+# Step 7 — SoD evaluation 
+from Governance.SoD.sod_loader import load_sod_policies
+from Governance.SoD.sod_checker import evaluate_sod
+from Governance.SoD.sod_models import (
+    FetchStatus,
+    EvaluationContext,
+    DetectionPath,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -117,13 +145,14 @@ def run_pipeline(
     correlation_id: str = "local",
 ) -> PipelineResult:
     """
-    Run the Phase 1 JML Joiner pipeline against a CSV file or HR API data. 
+    Run the Phase 1 JML Joiner pipeline against a CSV file or HR API data.
 
     Flow per record:
         Parse CSV → construct IdentityPayload → normalize
         → check for stale locks → claim event → conflict check
-        → resolve entitlements → pre-provision validation
-        → acquire lock → provision → post-provision validation
+        → resolve entitlements → SoD evaluation
+        → pre-provision validation → acquire lock
+        → provision → post-provision validation
         → release lock → release next queued event → audit report
 
     One DecisionReport is written per record regardless of outcome.
@@ -133,6 +162,9 @@ def run_pipeline(
     connection_string  = os.environ.get("JML_STORAGE_CONNECTION_STRING", "")
     mapping_rules_path = os.environ.get(
         "JML_MAPPING_RULES_PATH", "config/role_mapping_rules.json"
+    )
+    sod_policies_path  = os.environ.get(
+        "JML_SOD_POLICIES_PATH", "config/sod_policies.json"
     )
 
     hold_queue_client = get_hold_queue_table_client(connection_string)
@@ -146,7 +178,7 @@ def run_pipeline(
         logger.error(f"Failed to build Graph client: {e}")
         graph_client = None
 
-    lookup    = load_lookup_table(lookup_path)
+    lookup     = load_lookup_table(lookup_path)
     normalizer = Normalizer(lookup)
 
     try:
@@ -155,13 +187,36 @@ def run_pipeline(
         logger.error(f"Failed to load mapping rules: {e}")
         mapping_rules = []
 
+    # Load SoD policy catalogue 
+    #
+    # Loaded once per pipeline run — same pattern as mapping_rules above.
+    # A failure to load the catalogue is treated as a pipeline-level error.
+    # No records are processed without the SoD gate in place — fail closed.
+    #
+    # If sod_policies.json does not exist yet (pre-SoD deployment), the
+    # pipeline raises here and stops. Add the file before deploying this version.
+    #
+    try:
+        sod_policies = load_sod_policies(sod_policies_path)
+        logger.info("SoD policies loaded — %d policies", len(sod_policies))
+    except Exception as e:
+        logger.error(
+            "Failed to load SoD policies from '%s': %s — "
+            "pipeline cannot run without SoD gate. "
+            "Ensure sod_policies.json exists and is valid.",
+            sod_policies_path,
+            e,
+        )
+        raise
+
     all_reports: list[DecisionReport] = []
 
     csv_content  = Path(csv_path).read_text(encoding="utf-8-sig")
     parse_result = parse_csv(csv_content)
 
-    #  Parse rejections 
-    # Record never reached provisioning, i.e failed normalization and other checks.  also builds audit trail of the failure reasons
+    # Parse rejections 
+    # Record never reached provisioning — failed structural CSV validation.
+    # Builds audit trail of the failure reasons.
     for raw_row in parse_result.rejected_rows:
         employee_id = raw_row.get("EmployeeId", "unknown")
         upn         = raw_row.get("UPN", "unknown")
@@ -187,7 +242,7 @@ def run_pipeline(
         _write_report(report, output_dir, result)
 
         result.total += 1
-        result.held  += 1  
+        result.held  += 1
 
     # Valid rows 
     for raw_row in parse_result.valid_rows:
@@ -221,7 +276,7 @@ def run_pipeline(
             all_reports.append(report)
             _write_report(report, output_dir, result)
             result.total += 1
-            result.held  += 1  
+            result.held  += 1
             continue
 
         # Step 2 — Normalise
@@ -250,7 +305,7 @@ def run_pipeline(
             all_reports.append(report)
             _write_report(report, output_dir, result)
             result.total += 1
-            result.held  += 1  
+            result.held  += 1
             continue
 
         report.normalization_status = NormalizationStatus.PASSED
@@ -264,16 +319,12 @@ def run_pipeline(
         normalised_payload = norm_result.payload
 
         # Step 3 — Check for stale locks (GAP-002 remediation)
-        # If another instance crashed mid-provisioning >10 minutes ago,
-        # check_active_event() will reclaim the lock and return None.
-        # If another instance is actively processing right now, skip this record.
         active = check_active_event(
             table_client=events_client,
-            employee_id=normalised_payload.employee_id
+            employee_id= normalised_payload.employee_id,
         )
 
         if active and active.status == EventStatus.PROCESSING:
-            # Another instance is actively processing this employee right now
             logger.info(
                 f"Active event in progress — employee={normalised_payload.employee_id}, "
                 f"locked_by={active.locked_by}, exiting"
@@ -281,16 +332,13 @@ def run_pipeline(
             report.add_action(
                 action="ActiveEventSkipped",
                 detail=f"Another instance processing this employee (locked by {active.locked_by})",
-                succeeded=True
+                succeeded=True,
             )
             all_reports.append(report)
             _write_report(report, output_dir, result)
             result.total     += 1
             result.succeeded += 1
             continue
-
-        # If check_active_event reclaimed a stale lock, it returned None
-        # and the event is now Pending. claim_event() below will handle it.
 
         # Step 4 — Claim event
         import json as _json
@@ -318,7 +366,7 @@ def run_pipeline(
             report.add_action(
                 action="DuplicateEventSkipped",
                 detail="Event already exists in event store, idempotency exit",
-                succeeded=True
+                succeeded=True,
             )
             all_reports.append(report)
             _write_report(report, output_dir, result)
@@ -344,7 +392,7 @@ def run_pipeline(
             report.add_action(
                 action="EventQueued",
                 detail="Active event in progress — queued behind existing event",
-                succeeded=True
+                succeeded=True,
             )
             report.add_warning(
                 "Event queued — will process after active event completes"
@@ -371,7 +419,7 @@ def run_pipeline(
                 f"groups={entitlements.groups}, "
                 f"rbac_roles={len(entitlements.rbac_roles)}"
             ),
-            succeeded=True
+            succeeded=True,
         )
 
         if not entitlements.matched_rule_ids:
@@ -379,8 +427,125 @@ def run_pipeline(
                 "No mapping rules matched — user will have no group or RBAC assignments"
             )
 
-        # Step 7 — Pre-provision validation gate
-        # Failures go to the hold queue — never reached provisioning.
+        # Step 7 — SoD evaluation 
+        #
+        # Runs after entitlement resolution — needs the full resolved group set.
+        # Runs before the PowerShell validation gate — pure Python, no HTTP call,
+        # cheaper to detect here. PowerShell gate does not run for blocked records.
+        #
+        # Joiner context: current_groups is always empty — effective_access
+        # equals the resolved entitlement set only. FetchStatus.COMPLETE because
+        # no Graph call is needed.
+        #
+        # The group names in entitlements.groups are group IDs (GUIDs) from the
+        # mapping rules. The sod_policies.json set_a and set_b must use the same
+        # GUIDs — not display names — for string matching to work correctly.
+        #
+        sod_result = evaluate_sod(
+            requested_groups=            entitlements.groups,
+            current_groups=              [],
+            current_groups_fetch_status= FetchStatus.COMPLETE,
+            policies=                    sod_policies,
+            context=                     EvaluationContext.JOINER,
+            detection_path=              DetectionPath.PRE_PROVISION,
+        )
+
+        # Attach SoD violations to the audit report regardless of outcome.
+        # Block violations appear in sod_violations and hold_reasons.
+        # Warn violations appear in sod_violations and warnings.
+        # Clean result: sod_violations remains empty.
+        if hasattr(report, "sod_violations"):
+            report.sod_violations = [
+                {
+                    "policy_id":           v.policy_id,
+                    "policy_name":         v.policy_name,
+                    "risk_rating":         v.risk_rating.value,
+                    "action":              v.action.value,
+                    "conflicting_groups":  v.conflicting_groups,
+                    "evaluation_context":  v.evaluation_context.value,
+                    "detection_path":      v.detection_path.value,
+                    "detected_at":         v.detected_at.isoformat(),
+                    "compensating_control":v.compensating_control,
+                    "exception_applied":   v.exception_applied,
+                }
+                for v in sod_result.violations
+            ]
+
+        if sod_result.final_action == "block":
+            # SoD block — route to hold queue, stop processing.
+            # Uses create_from_sod_violation() — distinct from PowerShell
+            # validation failures so operators can route remediation correctly.
+            report.validation_status = ValidationStatus.FAILED
+
+            hold_record = hold_queue.create_from_sod_violation(
+                payload=    normalised_payload,
+                violations= sod_result.violations,
+            )
+            report.hold_record_id = hold_record.record_id
+
+            # Write structured violation detail to hold_reasons so the audit
+            # report is self-contained without needing the hold queue record.
+            from Hold_queue.queue_manager import _serialise_sod_violations
+            for reason in _serialise_sod_violations(sod_result.violations):
+                report.add_hold_reason(reason)
+
+            # If the block is from a data-quality failure (degraded fetch),
+            # record the infrastructure reason separately.
+            if sod_result.blocked_reason:
+                report.add_hold_reason(
+                    f"SoD evaluation blocked by infrastructure failure: "
+                    f"{sod_result.blocked_reason}"
+                )
+
+            update_event_status(
+                table_client= events_client,
+                employee_id=  normalised_payload.employee_id,
+                event_id=     event_id,
+                status=       EventStatus.FAILED,
+                failure_step= "SoDEvaluation",
+            )
+
+            logger.warning(
+                "SoD block — employee=%s, upn=%s, policies=%s",
+                normalised_payload.employee_id,
+                normalised_payload.upn,
+                [v.policy_id for v in sod_result.violations],
+            )
+
+            all_reports.append(report)
+            _write_report(report, output_dir, result)
+            result.total += 1
+            result.held  += 1
+            continue
+
+        elif sod_result.final_action == "warn":
+            # SoD warn — violations recorded, provisioning continues.
+            for v in sod_result.violations:
+                report.add_warning(
+                    f"[{v.policy_id}] {v.policy_name} — "
+                    f"{v.risk_rating.value} risk — "
+                    f"conflicting groups: {', '.join(v.conflicting_groups)}"
+                )
+            logger.warning(
+                "SoD warning — employee=%s, upn=%s, policies=%s — continuing",
+                normalised_payload.employee_id,
+                normalised_payload.upn,
+                [v.policy_id for v in sod_result.violations],
+            )
+
+        # sod_result.final_action == "clean" — continue normally, no action needed.
+
+        report.add_action(
+            action="SoDEvaluationPassed",
+            detail=(
+                f"final_action={sod_result.final_action}, "
+                f"violations={len(sod_result.violations)}, "
+                f"policies_evaluated={len(sod_policies)}"
+            ),
+            succeeded=True,
+        )
+
+        # Step 8 — Pre-provision validation gate (PowerShell governance engine)
         validation_result = pre_provision_validate(normalised_payload)
 
         if not validation_result.passed:
@@ -406,21 +571,19 @@ def run_pipeline(
             all_reports.append(report)
             _write_report(report, output_dir, result)
             result.total += 1
-            result.held  += 1  
+            result.held  += 1
             continue
 
         report.validation_status = ValidationStatus.PASSED
         for warning in validation_result.warning_summary():
             report.add_warning(warning)
 
-        # Step 8 — Guard: Graph client must be available before acquiring lock.
-        # A missing client means provisioning cannot run — record as failed,
-        # not held, because the data was valid and the block is infrastructure.
+        # Step 9 — Guard: Graph client must be available before acquiring lock.
         if graph_client is None:
             report.add_action(
                 action="ProvisioningSkipped",
                 detail="Graph client not available — check credentials in local.settings.json",
-                succeeded=False
+                succeeded=False,
             )
             update_event_status(
                 table_client= events_client,
@@ -431,8 +594,8 @@ def run_pipeline(
             )
             all_reports.append(report)
             _write_report(report, output_dir, result)
-            result.total   += 1
-            result.failed  += 1  
+            result.total  += 1
+            result.failed += 1
             continue
 
         instance_id = str(uuid.uuid4())
@@ -446,11 +609,7 @@ def run_pipeline(
             event_status= EventStatus.PROCESSING,
         )
 
-        # INTEGRATION POINT 2 — Provisioning Failed Mid-Sequence
         if not provisioning_result.succeeded:
-            # Provisioning ran but a step failed mid-sequence.
-            # Record as failed, the identity may be partially provisioned.
-            # Retry from beginning is safe because all Graph operations are idempotent.
             release_lock(events_client, normalised_payload.employee_id, event_id)
             update_event_status(
                 table_client= events_client,
@@ -459,8 +618,7 @@ def run_pipeline(
                 status=       EventStatus.FAILED,
                 failure_step= provisioning_result.failure_step,
             )
-            
-            # Release next queued event (will be held for manual review)
+
             next_event = release_next_queued_event(
                 table_client=       events_client,
                 employee_id=        normalised_payload.employee_id,
@@ -471,28 +629,25 @@ def run_pipeline(
                     f"Next queued event held for review — employee={normalised_payload.employee_id}, "
                     f"event_id={next_event.event_id} — predecessor failed at {provisioning_result.failure_step}"
                 )
-            
+
             all_reports.append(report)
             _write_report(report, output_dir, result)
             result.total  += 1
-            result.failed += 1  
+            result.failed += 1
             continue
 
-        # Step 9 — Post-provision validation
-        # Provisioning completed but tenant state may not match expected.
-        # Record as failed — distinct from a data hold.
+        # Step 10 — Post-provision validation
         post_result = post_provision_validate(
             entra_object_id=provisioning_result.entra_id,
             employee_id=    normalised_payload.employee_id,
         )
 
-        # INTEGRATION POINT 3 — Post-Provision Validation Failed
         if not post_result.passed:
             report.validation_status = ValidationStatus.FAILED
             report.add_action(
                 action="PostProvisionValidationFailed",
                 detail=f"failures={post_result.failure_summary()}",
-                succeeded=False
+                succeeded=False,
             )
             release_lock(events_client, normalised_payload.employee_id, event_id)
             update_event_status(
@@ -502,8 +657,7 @@ def run_pipeline(
                 status=       EventStatus.FAILED,
                 failure_step= "PostProvisionValidation",
             )
-            
-            # Release next queued event (will be held for manual review)
+
             next_event = release_next_queued_event(
                 table_client=       events_client,
                 employee_id=        normalised_payload.employee_id,
@@ -514,17 +668,17 @@ def run_pipeline(
                     f"Next queued event held for review — employee={normalised_payload.employee_id}, "
                     f"event_id={next_event.event_id} — predecessor failed post-provision validation"
                 )
-            
+
             all_reports.append(report)
             _write_report(report, output_dir, result)
             result.total  += 1
-            result.failed += 1  
+            result.failed += 1
             continue
 
         for warning in post_result.warning_summary():
             report.add_warning(warning)
 
-        # INTEGRATION POINT 1 — Provisioning Succeeded
+        # Step 11 — Provisioning succeeded
         release_lock(events_client, normalised_payload.employee_id, event_id)
         update_event_status(
             table_client=events_client,
@@ -533,7 +687,6 @@ def run_pipeline(
             status=      EventStatus.COMPLETED,
         )
 
-        # Release next queued event if one exists
         next_event = release_next_queued_event(
             table_client=       events_client,
             employee_id=        normalised_payload.employee_id,
@@ -608,9 +761,9 @@ def main(req):
         csv_path = _extract_csv_path(req, content_type)
     except ValueError as exc:
         return func.HttpResponse(
-            body=     json.dumps({"error": str(exc)}),
+            body=       json.dumps({"error": str(exc)}),
             status_code=400,
-            mimetype= "application/json",
+            mimetype=   "application/json",
         )
 
     pipeline_result = run_pipeline(

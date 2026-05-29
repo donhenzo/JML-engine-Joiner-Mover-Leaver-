@@ -1,127 +1,99 @@
-# Eliminating Day-One Access Risk with a Policy-Driven Identity Lifecycle Engine
+# Policy-Driven Identity Lifecycle Engine
 
 ### Joiner · Mover · Leaver — Microsoft Entra ID · Azure Functions · Microsoft Graph API
 
 ---
 
-## Executive Summary
+## What This Is
 
-Most identity provisioning systems create users first and validate access later. In that window however brief an identity can exist with incorrect group memberships, excessive permissions, or attribute conflicts that violate access policy. In regulated environments, that window is auditable. It shows up in access reviews. It has to be explained.
+Most provisioning systems create a user account first and check whether the access is correct afterwards. That gap, however short, is a real problem in regulated environments. It shows up in access reviews. Auditors ask questions about it. In some cases it constitutes a control failure.
 
-This project implements a pre-validation identity lifecycle engine for Microsoft Entra ID. No identity is created unless it first passes a pre-provision governance validation gate on its canonical attributes. Contractors cannot be provisioned into management-tier groups. Invalid HR data is prevented from reaching provisioning. Every decision is recorded in an immutable audit report regardless of outcome.
+This project takes a different approach. No identity is created until it has cleared a governance validation gate and a Separation of Duties check against a live conflict catalogue. If the HR data is incomplete, the record goes to a hold queue. If the resolved entitlements would put a user in two groups that should never coexist, provisioning is blocked before a user object exists. Every outcome, pass or fail, is written to a structured audit report.
 
-Post-provision remediation is eliminated for all violations detectable at the pre-provision stage, and strictly reduced for entitlement-level conflicts through targeted post-provision validation. The result is improved audit readiness and a provisioning pipeline where access correctness is enforced at the point of creation — not discovered after the fact.
-
----
-
-## The Business Problem
-
-In most enterprise environments, identity provisioning is reactive by design. A new hire joins. IT receives a ticket. A user is created. Group memberships are assigned based on whoever processed the request, what template was used last time, or what the previous person in that role had. Validation, if it happens at all, runs after the identity already exists.
-
-This creates three compounding failure modes:
-
-**Incorrect access from day one.** Without a defined policy engine, group assignment is inconsistent. Two people with the same job title in different departments can receive materially different access depending on who provisioned them. The same misconfiguration that slips through once becomes a pattern at scale.
-
-**A window of unauthorized access.** Even in systems that validate post-provision, the identity exists with potentially incorrect access during the window between creation and remediation. In a regulated environment like financial services, healthcare, government that window is not a technicality. It appears in audit logs. It requires explanation during access reviews. It can constitute a control failure.
-
-**No structured audit trail.** When provisioning is handled through tickets, scripts, or disconnected workflow tools, there is no structured record of what was provisioned, what policy drove the decision, or what happened when a step failed. Compliance evidence is reconstructed retrospectively, which introduces risk and operational cost.
+The engine connects directly to BambooHR for live ingestion, normalises raw HR data against a configurable lookup table, resolves entitlements through a policy rules engine, and provisions to Microsoft Entra ID via the Graph API.
 
 ---
 
-## Why Existing Approaches Fail
+## The Problem It Solves
 
-**Low-code workflow tooling**: such as Microsoft Entra ID Lifecycle Workflows is optimised for rapid deployment and operational orchestration. However, it lacks a centralised policy evaluation layer. Decision logic is distributed across workflows, group rules, and role assignments, making complex access decisions difficult to reason about, test, and audit consistently. While attribute-based rules can be implemented, they become fragmented and difficult to maintain at scale. Audit logs capture events, but not structured policy decisions, which limits the ability to reconstruct why a specific access outcome occurred.
+Identity provisioning fails in predictable ways. A new starter joins and IT raises a ticket. Someone assigns group memberships based on what the previous person in that role had, or what seemed right at the time. Nobody checks whether those groups are appropriate for the employment type. Nobody checks whether the combination of groups creates a Separation of Duties conflict. Validation, if it runs at all, happens after the identity already exists.
 
-**Manual provisioning**: IT ticket-based workflows fails not because people make mistakes, but because they introduce structural inconsistency. Policy lives in the mind of the engineer processing the ticket. It cannot be tested, versioned, or audited in any meaningful way.
+Three things go wrong consistently.
 
-**Post-provision validation**: running compliance scans after identities are created addresses the symptom rather than the cause. The incorrectly provisioned identity already exists. Remediating it requires additional work, additional audit entries, and in some cases, a formal incident record.
+**Access is inconsistent.** Two people with the same job title in different departments end up with different group memberships depending on who processed their request. The misconfiguration that gets through once tends to repeat.
 
-None of these approaches treat access correctness as a provisioning prerequisite. This engine does.
+**The audit window is real.** Even when a post-provision scan eventually catches a problem, the identity existed with incorrect access in the meantime. That window shows up in audit logs and has to be explained.
 
----
-
-## Positioning
-
-This engine is not a replacement for identity platforms such as Microsoft Entra ID or governance suites like SailPoint IdentityIQ or Saviynt Identity Cloud.
-
-It operates as a policy enforcement layer that sits between HR systems and identity platforms, ensuring that all provisioning requests are policy-compliant before execution. The focus is on the decision layer — how access entitlements are computed, validated, and recorded — rather than on directory management or access request workflows.
+**There is no structured record.** Ticket-based provisioning leaves no machine-readable evidence of what was provisioned, what policy justified it, or what happened when something went wrong. Compliance evidence gets reconstructed from memory and log files.
 
 ---
 
-## Solution Overview
+## Why Existing Tools Do Not Fix This
 
-The core design principle is policy-as-a-prerequisite, not policy-as-validation. Access decisions are computed and verified before identity creation, not evaluated after provisioning completes.
+**Entra ID Lifecycle Workflows** handles orchestration well but decision logic ends up scattered across workflow steps, group rules, and role assignments. Complex attribute-based policy is hard to test and harder to audit. The logs record that something happened, not why a specific access decision was made.
 
-This project implements a policy-driven identity lifecycle engine that evaluates every Joiner identity event against a governance rule set before any Entra ID object is created. The pipeline is linear, sequenced, and exits immediately when a constraint is violated — routing the record to a hold queue with a structured reason rather than proceeding to provisioning.
+**Manual provisioning** is not really about human error. The problem is that policy lives in someone's head. It cannot be versioned, tested, or consistently applied across a team.
 
-The engine enforces:
-
-- **Pre-provision governance validation**: no identity is created without clearing a hard policy gate
-- **Canonical data normalisation**: raw HR field values are resolved to controlled canonical values before any decision is made; unresolvable values are prevented from reaching provisioning
-- **Policy-driven entitlement resolution**: group and RBAC assignments are derived from externally configurable rule objects, not hardcoded logic
-- **Deterministic idempotency**: the same HR event processed twice produces exactly one outcome; retries are safe
-- **Immutable audit reporting**: every decision, every rule ID, every failure reason is written to a per-identity JSON report regardless of outcome
+**Running compliance scans after the fact** catches problems that already exist. The remediation work still has to happen, more audit entries get written, and in some environments a formal incident record follows.
 
 ---
 
-## Key Capabilities
+## How This Engine Works
 
-**Pre-Provision Validation Gate**
-The governance validation engine evaluates the canonical identity payload against 27 rules before any Entra ID object is created. A Contractor attempting to be provisioned into a Manager-tier group is blocked before a user object exists. A payload with a missing manager relationship is held for human review. Provisioning cannot proceed unless the gate passes.
+Access decisions are made before identity creation, not after.
 
-**Policy Rules Engine**
-Entitlement decisions are resolved by evaluating externally loaded rule objects against the canonical identity payload. Adding a new role mapping, new job title, new department, new group assignment is a configuration file edit with no redeployment. Every entitlement decision is traceable to a named rule ID in the audit report.
+When a provisioning event arrives, the pipeline runs in strict order. The HR record is parsed and normalised. The entitlements are resolved through a JSON policy rules engine. Those entitlements are checked against a SoD conflict catalogue. The canonical payload is evaluated against 27 governance rules. Only if all of that passes does the engine call the Graph API to create the user and assign groups. After provisioning, the validation engine runs again against the real Entra ID object to confirm the tenant state matches what was intended.
 
-**Employment Type Enforcement**
-The engine enforces employment type constraints at the payload level. Contractors and Interns cannot be provisioned into management-tier or privileged groups. This check runs in the pre-provision gate against the payload itself — the user is never created if the combination violates policy.
-
-**Canonical Normalisation Layer**
-Raw HR field values — variant spellings, case differences, abbreviations — are resolved to canonical values before any downstream component sees them. Unknown values route to the hold queue, not to provisioning. Policy changes to the canonical lookup require no code changes.
-
-**Deterministic Idempotency**
-The EventId is a SHA-256 hash of EmployeeId, Action, and StartDate. The same input always produces the same ID. Processing the same CSV twice produces one outcome. Function retries resolve safely without double-provisioning.
-
-**Hold Queue as a State Machine**
-Records that fail normalisation or validation are not discarded. They enter a formal state machine with explicit transitions, reason codes, retry counts, and a manual release path. Every held record is explainable and actionable.
-
-**Immutable Per-Identity Audit Reports**
-Every lifecycle event produces a structured JSON report regardless of outcome — pass, hold, or fail. Reports capture every action taken, every gate result, every rule ID that fired, and every failure reason. Each report provides full decision traceability, linking every provisioning outcome to the exact rule set and evaluation path that produced it. One file per identity event, written at the time of processing, never modified.
-
-**Post-Provision Validation**
-After provisioning completes, the validation engine re-runs against the real Entra ID object to confirm the provisioned state matches the expected entitlements. This uses a targeted Graph API path — three calls regardless of tenant size — rather than a full tenant scan.
-
-**Graph API Throttling Recovery**
-All Graph API calls are wrapped with automatic retry logic. HTTP 429 responses respect the `Retry-After` header and retry up to three times before failing. Server errors (5xx) use exponential backoff. Client errors (4xx) fail immediately without retry.
+Every step produces an audit record. Every gate that fails routes the record to a hold queue with a structured reason. Nothing is discarded.
 
 ---
 
-## IAM Principles Demonstrated
+## Capabilities
 
-**Least Privilege**
-Access is derived from validated identity attributes against a declarative policy. No speculative or convenience-based group assignments. Entitlements are the minimum required for the role and employment type.
+**Pre-provision governance gate.** The PowerShell validation engine evaluates 27 rules against the canonical identity payload before any Graph API call is made. Missing manager association, duplicate UPN, employment type in a Manager-tier role, privileged group correlation checks. If the gate fails, the record is held. Provisioning does not run.
 
-**Separation of Duties**
-The policy rule set enforces employment type constraints across privilege tiers. Contractors cannot hold Manager-tier group memberships. The engine enforces this structurally — it is not dependent on human review.
+**Separation of Duties.** Resolved entitlements are checked against `sod_policies.json` before the user is created. The evaluation model is `effective_access = current_groups + requested_groups`, so for Mover events the check runs against the full post-change state, not just the delta. Block-level violations stop provisioning and route the identity to a dedicated SoD hold record. Warn-level violations are recorded in the audit report and provisioning continues. The SoD catalogue is a JSON file with no code changes required to add new conflict pairs.
 
-**Governance Before Access**
-Provisioning is conditional on governance validation. The pre-provision gate is a hard block, not a recommendation. This closes the window of incorrect access that post-hoc validation leaves open.
+**Policy rules engine.** Group and RBAC assignments are derived from `role_mapping_rules.json`, evaluated against the canonical payload at runtime. Adding a new job title mapping or department rule is a config file edit. Every entitlement decision is traced to a named rule ID in the audit report.
 
-**Zero Trust Alignment**
-No identity is trusted by default. Every lifecycle event is validated against policy before access is granted. Access is explicitly derived from attributes, not inherited from templates or manual selection.
+**Employment type enforcement.** Contractors and Interns cannot be provisioned into Manager-tier or privileged groups. This is enforced in the pre-provision gate against the payload, before the user object exists.
 
-**Complete Auditability**
-Every access decision is traceable. Every rule that contributed to a provisioning outcome is recorded by ID. Every failure reason is written to the hold queue and the audit report. Compliance evidence is produced at provisioning time, not reconstructed later.
+**BambooHR integration.** The engine polls BambooHR directly and derives the lifecycle action (Joiner, Mover, Skip) by comparing the HR record against live Entra ID state. Delta polling fetches only employees changed since the last checkpoint. Three idempotency layers prevent double-provisioning regardless of ingestion mode.
+
+**Canonical normalisation.** Raw HR field values (abbreviations, case variants, misspellings) are resolved to controlled canonical values before any downstream component sees them. Unknown values go to the hold queue.
+
+**Deterministic idempotency.** The EventId is a SHA-256 hash of EmployeeId, Action, and StartDate. The same input always produces the same ID. Running the same record twice produces one outcome. Retries are safe.
+
+**Hold queue state machine.** Records that fail any gate enter a formal state machine with defined transitions, reason codes, retry counts, and a manual release path. SoD violations get a dedicated hold record type so operators can distinguish a governance block from a data quality problem.
+
+**Immutable audit reports.** Every identity event produces a structured JSON report regardless of outcome. The report captures every action taken, every gate result, every rule ID, every SoD violation with conflicting groups and compensating control text. One file per event, written once, never modified.
+
+**Post-provision validation.** After provisioning, the validation engine re-runs against the real Entra ID object using three targeted Graph calls, regardless of tenant size. The PowerShell engine also checks actual group memberships against the SoD catalogue, providing a second independent check against real tenant state.
+
+**Graph API throttling recovery.** All Graph calls use automatic retry. HTTP 429 responses respect the `Retry-After` header and retry up to three times. Server errors use exponential backoff. Client errors fail immediately.
 
 ---
 
-## Architecture Overview
+## IAM Design Principles
 
-The pipeline is linear and strictly sequenced. No record reaches provisioning without passing every gate. Each layer has a single responsibility and a defined output contract.
+**Least privilege.** Entitlements come from validated attributes evaluated against a policy. No template-based assignments. No convenience memberships.
+
+**Separation of duties.** The SoD catalogue is the single source of truth for conflict definitions. Both the Python engine (preventive, pre-provision) and the PowerShell engine (detective, FullScan and post-provision) read from the same file. Adding a new conflict pair is a one-line JSON edit.
+
+**Governance before access.** Both the validation gate and the SoD check are hard blocks. Neither is advisory. Provisioning cannot proceed until both pass.
+
+**Zero trust.** Every identity event is evaluated against policy before access is granted. Nothing is inherited from templates or inferred from role history.
+
+**Auditability.** Every provisioning decision is traceable to a rule ID. Every SoD violation is recorded with the conflicting groups, the policy that fired, and the compensating control requirement. Compliance evidence is produced at the time of provisioning.
+
+---
+
+## Pipeline Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        INPUT LAYER                              │
-│   HR CSV / API Feed → CSV Parser → Canonical IdentityPayload    │
+│   BambooHR API / CSV → Parser → Canonical IdentityPayload       │
 │   Structural failures → Hold Queue (NormalizationFailed)        │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
@@ -129,310 +101,171 @@ The pipeline is linear and strictly sequenced. No record reaches provisioning wi
 │                    NORMALIZATION LAYER                          │
 │   Canonical Lookup Table (Azure Storage JSON)                   │
 │   Raw field values → Standardised department / job title        │
-│   Unknown values → Hold Queue — never reach provisioning        │
+│   Unknown values → Hold Queue                                   │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────────┐
 │                       EVENT STORE                               │
-│   Azure Table Storage — JmlEvents table                         │
-│   SHA-256 deterministic EventId · claim_event() idempotency gate│
-│   Duplicate EventId → exit cleanly (no wasted work downstream)  │
-│   Stale lock detection — auto-reclaim if locked > 10 minutes    │
-│   Status: Pending → Processing → Completed / Failed             │
+│   Azure Table Storage - JmlEvents table                         │
+│   SHA-256 deterministic EventId · claim_event() idempotency     │
+│   Duplicate EventId → exit cleanly                              │
+│   Stale lock detection - auto-reclaim if locked > 10 minutes    │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────────┐
 │                     CONFLICT QUEUE                              │
 │   Check for active events on same EmployeeId                    │
 │   Active event exists → queue new event (FIFO per identity)     │
-│   Leaver arrives → supersede all pending events, claim directly │
-│   No conflict → proceed to entitlement resolution               │
+│   Leaver arrives → supersede all pending events                 │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────────┐
 │               ENTITLEMENT RESOLUTION LAYER                      │
-│   mapping_resolver.py evaluates Rules.json against payload      │
-│   JobTitle + Department + EmploymentType → Groups + RBAC + PIM  │
-│   pimGroups entries resolved alongside standard groups          │
+│   mapping_resolver.py evaluates role_mapping_rules.json         │
+│   JobTitle + Department + EmploymentType → Groups + RBAC        │
 │   Multiple rules can contribute entitlements per identity       │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────────┐
-│               PRE-PROVISION VALIDATION GATE ◄── MUST PASS       │
+│          SEPARATION OF DUTIES EVALUATION                        │
+│   sod_checker.evaluate_sod() - Python, no Graph API calls       │
+│   effective_access = current_groups + requested_groups          │
+│   ANY_TO_ANY intersection against sod_policies.json             │
+│   Block → Hold Queue (SoDViolation) → audit record              │
+│   Warn → violations in audit report → continue                  │
+│   Clean → continue                                              │
+└─────────────────────────────┬───────────────────────────────────┘
+                              │
+┌─────────────────────────────▼───────────────────────────────────┐
+│               PRE-PROVISION VALIDATION GATE                     │
 │   Identity Governance Validation Engine (PowerShell)            │
 │   27 rules evaluated against canonical payload                  │
 │   ENT-004: Contractor/Intern in Manager-tier role → blocked     │
-│   Zero Graph API calls — no Entra object exists yet             │
+│   Zero Graph API calls - no Entra object exists yet             │
 │   Failures → Hold Queue (ValidationFailed)                      │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────────┐
-│                    LOCK ACQUISITION                             │
-│   Acquire processing lock (LockedAt + LockedBy instance ID)     │
-│   Prevents concurrent processing of same identity               │
-│   10-minute stale lock timeout with automatic reclaim           │
-└─────────────────────────────┬───────────────────────────────────┘
-                              │
-┌─────────────────────────────▼───────────────────────────────────┐
 │              GRAPH API PROVISIONING LAYER                       │
-│   Create Entra ID user (with employeeType written to Graph)     │
-│   Assign security groups  (SG_*, LIC_*, CA_*)                   │
+│   Create Entra ID user                                          │
+│   Assign security groups (SG_*, LIC_*, CA_*)                    │
 │   Assign Azure RBAC roles via group membership                  │
 │   All operations idempotent · ActionsTaken recorded live        │
 │   429 throttling: automatic retry with Retry-After backoff      │
-│   5xx errors: exponential backoff · 4xx errors: fail immediate  │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────────┐
 │              PIM ELIGIBILITY LAYER (Phase 2)                    │
-│   Group-based PIM pattern — engine assigns eligible membership  │
-│   Entra Role → PIM Group (eligible) → User (eligible member)   │
-│   User activates on demand · access expires automatically       │
+│   Group-based PIM pattern - engine assigns eligible membership  │
+│   Requires Entra ID P2 - skipped gracefully if absent           │
 │   pimGroups entries in mapping rules drive this step            │
-│   Adding a new PIM mapping = one config entry, no code change   │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────────┐
 │             POST-PROVISION VALIDATION GATE                      │
 │   Validation engine re-runs against actual Entra ID state       │
 │   Get-UserSnapshot: 3 Graph calls, O(groups for this user)      │
-│   Confirms provisioned state matches expected entitlements      │
+│   SoD evaluation runs against real memberOf                     │
 │   ENT-002: Contractor in Manager-tier group → event failed      │
-└─────────────────────────────┬───────────────────────────────────┘
-                              │
-┌─────────────────────────────▼───────────────────────────────────┐
-│                  LOCK RELEASE & QUEUE DRAIN                     │
-│   Release processing lock · mark event Completed or Failed      │
-│   Predecessor succeeded → auto-release next queued event        │
-│   Predecessor failed → hold next queued event for manual review │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────────┐
 │                       AUDIT LAYER                               │
 │   Per-identity JSON decision report · every outcome             │
-│   Actions taken · validation status · rule IDs · hold reasons   │
-│   PimEligibilityAssigned recorded per group in ActionsTaken     │
+│   Actions taken · validation status · SoD violations · warnings │
+│   SoD violations: policy ID · conflicting groups ·              │
+│   compensating control · exception_applied flag                 │
 │   Immutable · one file per identity event                       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-Every failure path is handled explicitly. A structural parse failure, a normalisation failure, a validation failure, or a partial provisioning failure each route to a defined state in the hold queue or event store — with a recorded reason that an operator can inspect and act on.
+---
+
+## Separation of Duties
+
+### How the evaluation works
+
+The effective access set is `current_groups + requested_groups`. For a Joiner, `current_groups` is always empty, so effective access equals the resolved entitlements. For a Mover, `current_groups` is the user's actual tenant membership before the delta is applied. This is where real SoD violations hide in production: a role change adds a second entitlement that, combined with something the user already holds, creates a conflict.
+
+### Conflict catalogue
+
+Conflict pairs live in `sod_policies.json`. Both the Python engine and the PowerShell validation engine read from this file. No code changes are required to add or modify conflict pairs.
+
+| Policy | Conflict | Risk | Action |
+|---|---|---|---|
+| SOD-001 | Payment Approver + Payment Processor | Critical | Block |
+| SOD-002 | IT User Provisioner + IT Access Approver | Critical | Block |
+| SOD-003 | Payment Processor + Finance Auditor | High | Warn |
+| SOD-004 | Payment Approver + Finance Auditor | High | Warn |
+| SOD-005 | Journal Poster + Finance Auditor | High | Warn |
+| SOD-006 | HR Salary Admin + HR Data Export | High | Warn |
+
+### Two controls, one catalogue
+
+The Python `sod_checker.evaluate_sod()` is the preventive control. It runs before any Graph API call. A block violation stops provisioning before the user object exists.
+
+The PowerShell `Evaluate-SoDConflict` in `IDRuleProcessor.ps1` is the detective control. It runs during FullScan and post-provision verification, evaluating real tenant group memberships against the same catalogue. This catches violations that entered the tenant through manual assignment or before SoD was active.
+
+### Fail-closed on Mover
+
+If the Graph API call to fetch current group memberships returns incomplete or failed results for a Mover event, the SoD check blocks immediately without evaluating policies. A partial effective access set can miss real violations. A false block is recoverable through human review. A missed violation is not.
 
 ---
 
-## Technical Deep Dive
+## HR API Integration
 
-### Canonical Identity Schema
+```
+BambooHR API
+  ↓ bamboohr_client.py        fetch employee · delta poll · directory cache
+  ↓ bamboohr_mapper.py        BambooHR fields → raw IdentityPayload shape
+  ↓ action_deriver.py         Joiner / Mover / Skip - derived from live Entra state
+  ↓ ingestion_coordinator.py  run_single · run_delta · run_bulk
+  ↓ pipeline_adapter.py       bridges HR API records into the existing pipeline
+  ↓ existing pipeline         normalise → SoD → validate → provision → audit
+```
 
-Every component contracts against a single internal identity object. No component accepts raw CSV field names or ad-hoc dictionaries.
+| Mode | Command | Description |
+|---|---|---|
+| Single / batch | `--source api --id Acc003,Acc004` | Process specific employees by employee number or UPN |
+| Delta poll | `--source api --mode delta` | Process all employees changed since last checkpoint |
+| CSV | `--csv Data/sample.csv` | Original path, unchanged |
+
+Three idempotency layers prevent double-provisioning: delta timestamp narrows the BambooHR query window; action derivation filters records with no meaningful change; EventId + `claim_event()` provides the hard guarantee via Azure Table Storage atomic insert.
+
+---
+
+## Canonical Identity Schema
+
+Every component in the pipeline works against a single internal data contract. No component accepts raw CSV field names or unstructured dictionaries.
 
 | Field | Type | Notes |
 |---|---|---|
-| `employee_id` | str | Unique HR identifier. Required. |
-| `upn` | str | User principal name. |
-| `display_name` | str | Normalised full name. |
-| `department` | str | Normalised via canonical lookup. |
-| `job_title` | str | Normalised via canonical lookup. |
-| `manager_id` | str \| None | EmployeeId of manager. Optional. |
-| `start_date` | str | ISO 8601. |
-| `employment_type` | EmploymentType | Enum: Employee \| Contractor \| Guest. |
-| `location` | str \| None | Normalised via lookup. Optional. |
-| `action` | JmlAction | Enum: Joiner \| Mover \| Leaver. |
-| `retain_roles` | bool | Full retention toggle. Default: False. |
-| `retain_list` | list[str] | Selective role/group IDs to retain (Mover). |
-
-### Governance Rule Set
-
-The validation engine evaluates 27 rules across six categories. Rules are declared in `Rules.json` alongside the entitlement model and mapping rules — no rule logic is hardcoded.
-
-| Category | Rules | Blocking |
-|---|---|---|
-| Identity | IDENT-001/002/003 · JOIN-001/002 | IDENT-001/002 · JOIN-001/002 |
-| Access | ACCESS-001/002/003 · ENT-001/002/003/004 | ACCESS-002 · ENT-002 · ENT-004 |
-| Architecture | ARCH-001/002/003 | ARCH-001 |
-| Hygiene | HYG-001/002/003/004 | HYG-004 (FullScan · demoted in PostProvision) |
-| RBAC | RBAC-001/002/003 | RBAC-003 |
-| Correlation | CORR-001/002/003/004/005 | CORR-001/002/003 |
-
-**ENT-004** is the pre-provision payload check. It evaluates employment type against job title before any Entra object exists. Contractors and Interns attempting to be provisioned into Manager, Director, HOD, or Executive roles are blocked at this gate.
-
-**ENT-002** is the post-provision entitlement check. It evaluates actual group memberships against the entitlement model's `allowedEmployment` policy after provisioning completes.
-
-### Employment Type Vocabulary
-
-The JML engine uses `Employee | Contractor | Guest` (HR API conventions). The validation engine's entitlement model uses the same vocabulary. All `allowedEmployment` arrays in `Rules.json` reflect this canonical set. The normaliser in `IDRuleProcessor.ps1` accepts both `employee` and `full-time` during transition, mapping both to `Employee`.
-
-### Idempotency
-
-```
-EventId = SHA-256(EmployeeId + Action + StartDate) → truncated to 32 chars
-```
-
-The same CSV processed twice produces the same EventId. Azure Table Storage insert fails atomically if the row exists — second run exits cleanly. StartDate is included so a re-hire after a Leaver produces a distinct event, not a duplicate.
-
-### Concurrency Control
-
-A processing lock is written to the event row at the start of each run (`LockedAt`, `LockedBy`). Stale lock timeout is 10 minutes — if a function instance crashes, the lock is automatically reclaimed and the event reset to Pending so the next run can process it. Concurrent function instances processing the same event exit cleanly on the lock check.
-
-### FIFO Conflict Queue
-
-When a new event arrives for an identity that already has an active event in progress, the new event is queued automatically rather than held for human review. The queue is per-identity and ordered by arrival timestamp.
-
-When a predecessor event completes:
-- **Succeeded** → next queued event is auto-released to Pending for processing
-- **Failed** → next queued event is held for manual review (identity may be in partial state)
-
-Leaver events always take priority — when a Leaver arrives, all pending events for that identity are superseded and the Leaver claims the queue immediately.
-
-### Graph API Throttling Recovery
-
-All Graph API calls are wrapped with `@retry_on_throttle`:
-
-```
-429 (Too Many Requests) → respect Retry-After header → retry up to 3 times
-5xx (Server Error)      → exponential backoff (2^attempt × 2s) → retry up to 3 times
-4xx (Client Error)      → fail immediately, no retry
-```
-
-If throttling persists after all retries, `GraphThrottlingError` is raised and the event is marked Failed for operator review. The audit report records the failure step.
-
-### PIM Eligible Role Assignment (Phase 2)
-
-Phase 2 extends the Joiner pipeline with group-based PIM eligibility assignment. The pattern is:
-
-```
-Entra Role (e.g. User Administrator)
-    ↓  eligible assignment (configured in portal once)
-PIM Security Group (e.g. SG_PIM_IT_UserAdmin)
-    ↓  eligible membership (assigned by JML engine per identity)
-User (provisioned by JML engine)
-```
-
-The user activates their group membership via PIM when they need the role. On activation they temporarily inherit the group's eligible Entra role. On deactivation or expiry the role is removed automatically. The engine never touches Entra role definitions directly — it only manages eligible group membership.
-
-**How it integrates with the mapping rules:**
-
-Adding a PIM mapping for a job title requires one `pimGroups` entry in the relevant rule in `role_mapping_rules.json`. No code changes:
-
-```json
-"pimGroups": [
-  {
-    "id":            "bcbd36bc-36e5-40f0-82e1-58270df9720d",
-    "displayName":   "SG_PIM_IT_UserAdmin",
-    "eligibleRole":  "User Administrator",
-    "justification": "IT Manager requires on-demand user administration access",
-    "durationHours": 8
-  }
-]
-```
-
-**Current PIM mappings:**
-
-| Job Title | PIM Group | Eligible For |
-|---|---|---|
-| Head of Finance | `SG_PIM_Finance_GlobalReader` | Global Reader |
-| Security HOD | `SG_PIM_Security_Admin` | Security Administrator |
-| IT Manager | `SG_PIM_IT_UserAdmin` | User Administrator |
-
-**Graph API endpoint used:**
-
-```
-POST /identityGovernance/privilegedAccess/group/eligibilityScheduleRequests
-```
-
-Requires `PrivilegedAccess.ReadWrite.AzureADGroup` and `PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup` on the app registration in addition to the existing permissions. The PIM groups must be created with `isAssignableToRole: true` — this flag cannot be changed after creation.
-
-**Audit trail:**
-
-Each PIM eligibility assignment is recorded in `ActionsTaken` as `PimEligibilityAssigned` with the group name and eligible role. If the assignment already exists on retry, `already_existed` is noted and the step passes cleanly.
-
-### Post-Provision Graph Efficiency
-
-The original post-provision path used `Get-IdentitySnapshot` — full tenant collection scaling as O(groups × members). On tenants with 50+ groups this consistently exceeded timeout thresholds.
-
-`Get-UserSnapshot` replaces this with three targeted Graph calls:
-1. `GET /users/{id}` — fetch the provisioned user
-2. `GET /users/{id}/memberOf` — fetch their group memberships directly
-3. `GET /groups/{id}` per membership — resolve display names
-
-Runtime dropped from consistent 60-second timeouts to approximately 12 seconds end-to-end.
-
-### Audit Report Structure
-
-```json
-{
-  "identity": "felix.wagner@contoso.com",
-  "employee_id": "E406",
-  "event": "Joiner",
-  "validation_status": "Failed",
-  "normalization_status": "Passed",
-  "actions_taken": [],
-  "warnings": [],
-  "hold_reasons": [
-    "[ENT-004] Employment type 'Contractor' is not permitted for Manager-tier role 'Sales Manager'. Contractors and Interns cannot be provisioned into management positions."
-  ],
-  "timestamp": "2026-05-04T14:17:17Z",
-  "engine_version": "1.0.0"
-}
-```
+| `employee_id` | str | Unique HR identifier |
+| `upn` | str | User principal name |
+| `display_name` | str | Normalised full name |
+| `department` | str | Normalised via canonical lookup |
+| `job_title` | str | Normalised via canonical lookup |
+| `manager_id` | str / None | EmployeeId of manager |
+| `start_date` | date | ISO 8601 |
+| `employment_type` | EmploymentType | Employee, Contractor, or Guest |
+| `location` | str / None | Normalised via lookup |
+| `action` | JmlAction | Joiner, Mover, or Leaver |
+| `retain_roles` | bool | Full retention toggle for Mover |
+| `retain_list` | list[str] | Specific role/group IDs to retain |
 
 ---
 
-## Group Naming Convention
+## Known Limitations
 
-The engine provisions into standardised groups only. Legacy groups are never assigned to new identities.
+**PIM requires Entra ID P2.** PIM eligibility assignments are non-blocking. If the tenant has no P2 licence, the PIM step is skipped with a warning and the event completes successfully. Group assignments are unaffected.
 
-| Prefix | Purpose | Example |
-|---|---|---|
-| `SG_*` | Security groups — department and role baseline | `SG_Sales_Core` |
-| `LIC_*` | Licence assignment groups | `LIC_M365_E3` |
-| `CA_*` | Conditional Access policy groups | `CA_Contractors` |
+**SoD exception store is a stub.** The `_exception_exists()` function returns False unconditionally. Building a real exception store requires agreement on who can approve exceptions, for how long, and with what justification. The detection layer works correctly regardless.
 
-### Employment Tier Model
+**No automatic rollback on partial failure.** All Graph operations are idempotent, so retrying from the beginning is safe. Partial state between failure and retry is a transient condition, not a persistent one.
 
-| Tier | Description | Privileged | EmploymentType Restriction |
-|---|---|---|---|
-| Base | Standard department membership | No | Employee, Contractor, Intern |
-| Base/Staff | Operational access, elevated permissions | No | Employee, Contractor |
-| Manager | Management-level access | Yes | Employee only |
-| Manager/Staff | Combined management and operational | Yes | Employee only |
-| Administrative | Licence / Conditional Access groups | No | Varies |
+**Queued events need a trigger to drain.** When a queued event is auto-released, it moves to Pending but waits for the next pipeline run. A timer-triggered function is the production solution.
 
----
-
-## Business Impact
-
-**No identity that violates pre-provision policy constraints can be provisioned.** The pre-provision gate is a hard block. A Contractor cannot be assigned to a Manager-tier group. An identity with unresolvable HR attributes is prevented from reaching provisioning. These constraints are enforced structurally, not by process.
-
-**Every access decision is explainable.** Every group assignment is traceable to a named rule ID. Every failure reason is recorded at the time of processing. Compliance evidence does not need to be reconstructed — it exists in the audit report.
-
-**Post-provision remediation is eliminated for all violations detectable at the pre-provision stage.** Because access correctness for payload-level constraints is enforced before the identity exists, there is no incorrect state to remediate for those cases. The hold queue surfaces exceptions for human review; provisioned identities meet pre-provision policy by construction.
-
-**Policy changes require no redeployment.** Adding a new role, changing a group assignment, updating employment type constraints — all are configuration file edits. The engine picks up changes on the next run.
-
----
-
-## Limitations and Trade-offs
-
-**PIM eligibility requires Entra ID P2 and role-assignable groups.** The `isAssignableToRole` flag on a group must be set at creation — it cannot be changed after the group exists. PIM eligibility schedule propagation can lag 15-30 seconds after assignment, which is why the post-provision PIM check is non-blocking. A FullScan will catch persistent gaps.
-
-**Dependent on HR data quality.** The normalisation layer resolves known variants but unknown values route to the hold queue. If the HR system produces field values not in the canonical lookup table, records will be held until the lookup is updated. Garbage in, hold queue out — not garbage in, provisioning out.
-
-**Pre-provision validation evaluates payload, not entitlements.** ENT-004 catches employment type and job title conflicts at the payload level. ENT-002 catches group membership conflicts at the post-provision level. Between the two gates there is a window where provisioning runs — if a mapping rule produces an entitlement that would violate policy, the post-provision gate catches it but the user object is created. The design decision was to keep the pre-provision gate fast (zero Graph calls) and the post-provision gate complete.
-
-**No automatic rollback on partial provisioning failure.** Provisioning is a multi-step operation (create user → assign groups → assign RBAC → assign PIM). If a step fails mid-sequence, previously completed steps remain in Entra ID. The user exists with partial access until retry completes. All Graph operations are idempotent, so retry from the beginning is safe and will complete the provisioning sequence. This design accepts partial state as a transient condition between failure and successful retry, rather than implementing compensating transactions (delete user, remove groups) which could themselves fail and leave the system in a worse state.
-
-**No batch size limit enforced on CSV input.** The pipeline processes all valid rows in a single run with no maximum batch size or rate limiting between records. Large batches (>500 identities) may encounter Graph API throttling or Azure Function timeout limits even with retry logic in place. Recommended approach: split large onboarding waves into batches of 100-200 records, or implement a queue-based architecture where CSV parsing writes to Azure Queue Storage and a separate function processes events one at a time with natural backpressure.
-
-**Queued events require a new pipeline run to drain.** When a queued event is auto-released (predecessor completes), it transitions to Status: Pending with QueuedAt cleared, but nothing picks it up until the next CSV run or a manual trigger. In production, a timer-triggered function should scan for released events on a schedule and process them automatically.
-
-**Schema versioning not implemented.** The `IdentityPayload` dataclass has no version field. Events stored in the Event Store cannot be safely deserialized if the schema changes in a breaking way (new required fields, changed enum values). A versioned deserializer is required before any breaking schema migration is deployed.
-
-**Policy complexity scales with the mapping rule set.** As the number of departments, job titles, and employment types grows, the `Rules.json` entitlement model grows with it. Without a role abstraction layer (planned), HR title changes require mapping rule updates.
-
-**HR API integration is polling-based, not webhook-driven.** The engine pulls from BambooHR via delta polling and processes changes since the last checkpoint. Live webhook integration is the planned next step — `run_single()` is already the atomic unit, so a webhook handler requires no pipeline changes, only a new HTTP trigger entry point.
-
-**Hold Queue UI not implemented.** Held records are visible in Azure Table Storage and the audit reports. A manual review and release interface is deferred.
+**HR API is polling-based.** Delta polling narrows the query window. A webhook handler is the planned next step and would only require a new HTTP trigger entry point.
 
 ---
 
@@ -441,92 +274,11 @@ The engine provisions into standardised groups only. Legacy groups are never ass
 | Phase | Capability | Status |
 |---|---|---|
 | Phase 0 | Data contracts, normalisation, event store, hold queue, audit system | Complete |
-| Phase 1 | Joiner provisioning pipeline, governance gates, policy-driven entitlements | Complete |
-| Phase 2 | PIM eligible role assignment via group-based PIM pattern (requires Entra ID P2) | Complete |
-| Phase 3 | Mover — delta calculation, permission recalibration, RetainList support | Designed, not started |
-| Phase 4 | Leaver — full revocation, session termination, M365/app removal | Designed, not started |
-
----
-
-## HR API Integration
-
-The engine supports live HR API ingestion as an alternative to CSV input. The integration layer sits between the HR system and the existing pipeline — every downstream component (normalisation, validation, provisioning, audit) is unchanged.
-
-### Architecture
-
-```
-BambooHR API
-  ↓ bamboohr_client.py        fetch employee · fetch changed employees · directory cache
-  ↓ bamboohr_mapper.py        BambooHR fields → raw IdentityPayload shape
-  ↓ action_deriver.py         Joiner / Mover / Skip — derived from live Entra state
-  ↓ ingestion_coordinator.py  run_single · run_delta · run_bulk
-  ↓ pipeline_adapter.py       bridges HR API records into the existing pipeline
-  ↓ existing pipeline         normalise → validate → provision → audit (unchanged)
-```
-
-### Ingestion Modes
-
-| Mode | Command | Description |
-|---|---|---|
-| Single / batch | `--source api --id Acc003,Acc004` | Process specific employees by employee number, UPN, or BambooHR ID |
-| Delta poll | `--source api --mode delta` | Process all employees changed since last checkpoint |
-| CSV (original) | `--csv Data/sample.csv` | Original path — unchanged |
-
-### Action Derivation
-
-Before entering the pipeline, each HR record is evaluated against live Entra ID state to determine the correct lifecycle action:
-
-- **Joiner** — UPN not found in Entra → new identity, provision from scratch
-- **Mover** — UPN exists, department or job title changed → entitlement recalculation (Phase 3)
-- **Skip** — UPN exists, no meaningful change → no action taken
-
-### Idempotency
-
-Three layers prevent double-provisioning under any ingestion mode:
-
-1. **Delta timestamp** — narrows the BambooHR query window to changes since last successful poll
-2. **Action derivation** — filters records with no meaningful change before they reach the pipeline
-3. **EventId + claim_event()** — SHA-256 deterministic event ID; Azure Table Storage insert fails atomically if the row already exists
-
-### State Persistence
-
-Poll checkpoints are stored in Azure Table Storage (`JmlSystemState` table, separate from `JmlEvents`):
-
-```
-PartitionKey: "SYSTEM"
-RowKey:       "HR_POLL_CHECKPOINT"
-Fields:       LastSuccessfulPoll · LastRunStatus · RecordsProcessed · LastEventId
-```
-
-The timestamp only advances on a successful poll. On failure, the next run re-processes the same window — idempotency handles duplicates safely.
-
-### Directory Cache
-
-On the first employee lookup per run, the client fetches the full BambooHR directory once and builds an in-memory `employeeNumber → internal ID` map. All subsequent lookups in the same batch resolve instantly from cache — no repeated API calls per employee.
-
-### Ingestion Layer Structure
-
-```
-Ingestion/hr_api/
-├── bamboohr_client.py        # BambooHR API client · directory cache · resolve by employee number or UPN
-├── bamboohr_mapper.py        # Field translation · employeeNumber as employee_id
-├── action_deriver.py         # Joiner / Mover / Skip derivation via live Graph lookup
-├── system_state.py           # Poll checkpoint persistence · Azure Table Storage
-├── pipeline_adapter.py       # Bridges HR API records into existing pipeline
-└── ingestion_coordinator.py  # Orchestrates fetch · derive · pipeline · checkpoint
-```
-
----
-
-## Premium Licence Dependencies
-
-| Feature | Licence | Required From |
-|---|---|---|
-| Core provisioning (users, groups, RBAC) | Entra ID Free | Phase 0–1 |
-| Dynamic membership rules | Entra ID P1 | Phase 1 (optional enhancement) |
-| Privileged Identity Management (PIM) | Entra ID P2 | Phase 2 ✓ |
-
-The core engine requires no premium licensing. Premium features are additive layers.
+| Phase 1 | Joiner provisioning, governance gates, policy-driven entitlements | Complete |
+| Phase 2 | PIM eligible role assignment (requires Entra ID P2) | Complete |
+| Phase 2.5 | Separation of Duties - preventive and detective controls | Complete |
+| Phase 3 | Mover - delta calculation, permission recalibration | Designed, not started |
+| Phase 4 | Leaver - full revocation, session termination | Designed, not started |
 
 ---
 
@@ -536,25 +288,18 @@ The core engine requires no premium licensing. Premium features are additive lay
 # Install Python dependencies
 pip install -r requirements.txt
 
-# Terminal 1 — start the PowerShell validation engine
+# Terminal 1 - start the PowerShell validation engine
 cd Validation_engine
 func start
-# Wait for: Host lock lease acquired by instance ID.
 
-# Terminal 2 — CSV mode (original)
-cd JML-engine
+# Terminal 2 - CSV mode
 python scripts/run_local.py --clean --output reports --csv Data/sample_hr.csv
 
-# Terminal 2 — API mode (single employee by employee number)
+# Terminal 2 - single employee from BambooHR
 python scripts/run_local.py --source api --id Acc003
 
-# Terminal 2 — API mode (batch)
-python scripts/run_local.py --source api --id Acc003,Acc004,Acc005,Acc006 --clean --output reports
-
-# Terminal 2 — API mode (delta poll — changes since last checkpoint)
+# Terminal 2 - delta poll
 python scripts/run_local.py --source api --mode delta
-
-# Audit reports written to reports/{employee_id}_{event}_{timestamp}.json
 ```
 
 ---
@@ -568,51 +313,55 @@ JML-Engine/
 │   │   └── __init__.py              # Azure Function HTTP trigger · run_pipeline()
 │   └── Event_store/
 │       ├── event_store.py           # SHA-256 EventId · claim_event() · stale lock recovery
-│       └── conflict_queue.py        # Conflicting event FIFO queue · auto-release on completion
+│       └── conflict_queue.py        # FIFO queue · auto-release on completion
 ├── Ingestion/
 │   ├── csv_parser.py                # CSV ingestion · structural validation
 │   ├── schema.py                    # IdentityPayload · JmlAction · EmploymentType enums
-│   └── hr_api/                      # HR API ingestion layer
-│       ├── bamboohr_client.py       # BambooHR API client · directory cache
-│       ├── bamboohr_mapper.py       # Field translation · employeeNumber as employee_id
-│       ├── action_deriver.py        # Joiner / Mover / Skip derivation
-│       ├── system_state.py          # Poll checkpoint · Azure Table Storage
-│       ├── pipeline_adapter.py      # Bridges HR records into existing pipeline
-│       └── ingestion_coordinator.py # Orchestrates fetch · derive · pipeline
+│   └── hr_api/
+│       ├── action_deriver.py        # Joiner / Mover / Skip derivation · provider-agnostic
+│       ├── system_state.py          # Poll checkpoint · Azure Table Storage · provider-agnostic
+│       └── bamboohr/
+│           ├── bamboohr_client.py   # BambooHR API client · directory cache
+│           ├── bamboohr_mapper.py   # Field translation · employeeNumber as employee_id
+│           ├── pipeline_adapter.py  # Bridges HR records into pipeline
+│           └── ingestion_coordinator.py  # Orchestrates fetch · derive · pipeline · checkpoint
 ├── Normalization/
 │   ├── lookup_loader.py             # Loads canonical_lookup.json
 │   └── normalizer.py                # Resolves raw field values · accumulates failures
 ├── Mapping/
-│   ├── mapping_loader.py            # Loads role_mapping_rules.json from Azure Storage
+│   ├── mapping_loader.py            # Loads role_mapping_rules.json
 │   └── mapping_resolver.py          # Evaluates rules against identity payload
+├── Governance/
+│   └── SoD/
+│       ├── sod_models.py            # Enums · SoDPolicy · SoDViolation · SoDCheckResult
+│       ├── sod_loader.py            # Loads and validates sod_policies.json
+│       └── sod_checker.py           # evaluate_sod() · ANY_TO_ANY · fail-closed contract
 ├── Provisioning/
-│   ├── graph_client.py              # Graph API client · retry on 429 · PIM HTTP calls
-│   ├── pim_client.py                # PIM group eligibility assignment · delegates to graph_client
-│   └── provisioner.py               # Entra ID user · group · RBAC · PIM eligibility provisioning
+│   ├── graph_client.py              # Graph API client · retry on 429
+│   ├── pim_client.py                # PIM group eligibility assignment
+│   └── provisioner.py               # Entra ID user · group · RBAC · PIM provisioning
 ├── Validation/
-│   └── validation_gate.py           # Pre- and post-provision validation gate (HTTP)
+│   └── validation_gate.py           # Pre- and post-provision gate (HTTP)
 ├── Hold_queue/
 │   ├── models.py                    # HoldStatus enum · HoldRecord · state constants
-│   ├── queue_manager.py             # State machine · VALID_TRANSITIONS enforced
-│   └── azure_table_hold_queue_store.py  # Azure Table Storage backend
+│   ├── queue_manager.py             # State machine · create_from_sod_violation()
+│   └── azure_table_hold_queue_store.py
 ├── Audit/
-│   ├── models.py                    # DecisionReport · ActionRecord · status enums
+│   ├── models.py                    # DecisionReport · ActionRecord · sod_violations
 │   ├── report_writer.py             # Per-identity JSON audit reports
-│   └── run_summary_writer.py        # Per-run summary report
+│   └── run_summary_writer.py        # Per-run summary
 ├── config/
-│   ├── canonical_lookup.json        # Field variant → canonical value mappings
-│   └── role_mapping_rules.json      # JobTitle / Dept / EmploymentType → groups + RBAC
+│   ├── canonical_lookup.json        # Field variant to canonical value mappings
+│   ├── role_mapping_rules.json      # JobTitle / Dept / EmploymentType to groups + RBAC
+│   └── sod_policies.json            # SoD conflict pairs · risk ratings · compensating controls
 ├── scripts/
-│   └── run_local.py                 # Local pipeline runner
-├── reports/                         # Audit report output directory
-└── Tests/                           # Unit tests for all modules
+│   └── run_local.py
+├── reports/
+└── Tests/
+    ├── test_normalizer.py
+    ├── test_sod.py                  # 63 tests covering sod_loader and sod_checker
+    └── ...
 ```
-
----
-
-## Related Repository
-
-The **Identity Governance Validation Engine** (PowerShell) that powers the pre- and post-provision validation gates lives in a separate repository. It operates independently and can be run against any Entra ID tenant for governance scanning, drift detection, and compliance reporting.
 
 ---
 
@@ -622,8 +371,20 @@ The **Identity Governance Validation Engine** (PowerShell) that powers the pre- 
 |---|---|
 | Runtime | Azure Functions (Python 3.11) |
 | Identity Platform | Microsoft Entra ID |
-| API | Microsoft Graph API (sole integration interface) |
-| Storage | Azure Table Storage (event store, hold queue backend) |
-| Config | Azure Storage Account (canonical lookup, rules JSON) |
-| Auth | Managed Identity — no credential management |
+| API | Microsoft Graph API |
+| Storage | Azure Table Storage |
+| Config | Azure Storage Account |
+| Auth | Managed Identity |
 | Validation Engine | PowerShell Azure Function (separate repo) |
+| HR Integration | BambooHR API (live) · OrangeHR webhook (planned) |
+
+---
+
+## Licence Dependencies
+
+| Feature | Licence | Required From |
+|---|---|---|
+| Core provisioning (users, groups, RBAC) | Entra ID Free | Phase 0-1 |
+| SoD enforcement | Entra ID Free | Phase 2.5 |
+| Dynamic membership rules | Entra ID P1 | Phase 1 (optional) |
+| Privileged Identity Management | Entra ID P2 | Phase 2 |

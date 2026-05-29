@@ -449,14 +449,12 @@ def _assign_pim_eligibility(
     Assign eligible group membership for all PIM groups resolved for this identity.
 
     Called from provision_joiner() after RBAC assignment.
-    Each PIM group is independent — a failure on one stops the run and
-    marks the event Failed with failure_step=PimEligibilityAssignment.
+    PIM failure is non-blocking. The most common cause is a tenant without
+    Entra ID P2 — the identity is correctly provisioned with all groups,
+    PIM eligibility alone is missing. This is recorded as a warning in the
+    audit report and provisioning continues. FullScan will catch persistent gaps.
 
-    Returns True if all PIM eligibility assignments succeeded or already existed.
-    Returns False on first failure — result is populated before returning.
-
-    Partial failure behaviour matches the group and RBAC steps:
-    better to surface a clear failure than silently continue.
+    Returns True always — PIM failure does not halt provisioning.
     """
     for pim_group in pim_groups:
         pim_result = assign_pim_group_eligibility(
@@ -485,22 +483,63 @@ def _assign_pim_eligibility(
                 f"PIM eligibility assigned — employee={employee_id}, "
                 f"group={pim_group.display_name}, role={pim_group.eligible_role}"
             )
+
         else:
-            report.add_action(
-                action="PimEligibilityFailed",
-                detail=(
+            # PIM failure is non-blocking. Record as warning, continue.
+            # Two distinct cases:
+            #   1. License error — tenant has no P2. Expected in dev/test tenants.
+            #      Record as PimEligibilitySkipped with a clear explanation.
+            #   2. Any other error — unexpected. Record as PimEligibilityFailed
+            #      with a warning so the operator can investigate.
+            # In both cases provisioning continues — return True at end of loop.
+            error_msg = pim_result.error or ""
+            is_license_error = (
+                "AadPremiumLicenseRequired" in error_msg
+                or "P2" in error_msg
+                or "Governance license" in error_msg
+            )
+
+            if is_license_error:
+                detail = (
+                    f"group={pim_group.display_name} — "
+                    f"eligible for {pim_group.eligible_role} — "
+                    f"skipped: tenant requires Entra ID P2 for PIM. "
+                    f"Group assignments completed successfully."
+                )
+                report.add_action(
+                    action="PimEligibilitySkipped",
+                    detail=detail,
+                    succeeded=True,
+                )
+                report.add_warning(detail)
+                logger.warning(
+                    f"PIM eligibility skipped — no P2 license — "
+                    f"employee={employee_id}, group={pim_group.display_name}"
+                )
+
+            else:
+                # Unexpected PIM failure — not a license issue.
+                # Record as a failed action but still non-blocking.
+                detail = (
                     f"group={pim_group.display_name} — "
                     f"eligible for {pim_group.eligible_role} — "
                     f"error: {pim_result.error}"
-                ),
-                succeeded=False,
-            )
-            result.failure_step   = "PimEligibilityAssignment"
-            result.failure_detail = pim_result.error
-            logger.error(
-                f"PIM eligibility failed — employee={employee_id}, "
-                f"group={pim_group.display_name}, error={pim_result.error}"
-            )
-            return False
+                )
+                report.add_action(
+                    action="PimEligibilityFailed",
+                    detail=detail,
+                    succeeded=False,
+                )
+                report.add_warning(
+                    f"PIM eligibility failed (non-blocking) — "
+                    f"group={pim_group.display_name}, "
+                    f"role={pim_group.eligible_role} — "
+                    f"provisioning continued. Error: {pim_result.error}"
+                )
+                logger.warning(
+                    f"PIM eligibility failed (non-blocking) — "
+                    f"employee={employee_id}, group={pim_group.display_name}, "
+                    f"error={pim_result.error}"
+                )
 
     return True

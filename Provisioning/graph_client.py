@@ -9,9 +9,10 @@
 #   Phase 1 needs, runs async SDK calls synchronously, and converts
 #   responses into plain dicts the provisioner can work with.
 #
-#   It also owns the two custom exception types (GraphClientError,
-#   UserNotFoundError) so the provisioner never has to catch SDK-specific
-#   exceptions or inspect raw HTTP status codes directly.
+#   It also owns the three custom exception types (GraphClientError,
+#   UserNotFoundError, GraphThrottlingError) so the provisioner never
+#   has to catch SDK-specific exceptions or inspect raw HTTP status
+#   codes directly.
 #
 # WHAT IT COVERS:
 #   User creation and lookup
@@ -25,11 +26,18 @@
 #   the check first so the pipeline is safe to retry from the beginning
 #   without creating duplicate users, groups, or role assignments.
 #
-# RETRY LOGIC (GAP-001 remediation):
+# RETRY LOGIC:
 #   All Graph API calls are wrapped with @retry_on_throttle.
-#   429 (Too Many Requests) → respects Retry-After header
-#   5xx (Server Error)       → exponential backoff up to 3 retries
-#   4xx (Client Error)       → fails immediately, no retry
+#   429 (Too Many Requests) → respects Retry-After header, up to max_retries
+#   5xx (Server Error)      → exponential backoff up to max_retries
+#   4xx (Client Error)      → fails immediately, no retry (except 429)
+#   Other exceptions        → exponential backoff, treated as transient
+#
+#   IMPORTANT: Methods that catch SDK exceptions and re-raise as
+#   GraphClientError must extract the status code before wrapping,
+#   otherwise the decorator loses visibility of whether the failure
+#   is retryable. See _extract_status_code() and the status_code
+#   parameter on GraphClientError.
 #
 # AUTH:
 #   Local dev  — ClientSecretCredential, reads from local.settings.json.
@@ -46,11 +54,9 @@ import asyncio
 import logging
 import os
 import time
-from dataclasses import dataclass
 from functools import wraps
 
-
-from azure.identity import ClientSecretCredential, DefaultAzureCredential
+from azure.identity import ClientSecretCredential
 from msgraph.graph_service_client import GraphServiceClient
 from msgraph.generated.models.user import User
 from msgraph.generated.models.password_profile import PasswordProfile
@@ -59,18 +65,29 @@ from msgraph.generated.models.reference_create import ReferenceCreate
 logger = logging.getLogger(__name__)
 
 
+# Exceptions
+
 class GraphClientError(Exception):
     """
     Base exception for all Graph API failures in this module.
-    Wraps SDK-specific exceptions so the provisioner only needs to
-    catch one type regardless of what the SDK throws internally.
+
+    Wraps SDK-specific exceptions so the provisioner only needs to catch
+    one type regardless of what the SDK throws internally.
+
+    status_code is carried on the exception so the @retry_on_throttle
+    decorator can classify the failure even after the original SDK exception
+    has been replaced by this wrapper. Methods must extract the status code
+    from the SDK exception before raising GraphClientError — do not lose it.
     """
-    pass
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class UserNotFoundError(GraphClientError):
     """
     Raised by get_user() when a UPN does not exist in Entra ID.
+
     Kept separate from GraphClientError so check_upn_exists() in
     validation_gate.py can distinguish a clean 404 from a real error
     without parsing exception messages.
@@ -81,11 +98,14 @@ class UserNotFoundError(GraphClientError):
 class GraphThrottlingError(GraphClientError):
     """
     Raised when Graph API throttling (429) persists after all retries.
+
     Kept separate so the provisioner can distinguish throttling failures
-    from other transient or permanent errors.
+    from other transient or permanent errors and route accordingly.
     """
     pass
 
+
+# Retry decorator
 
 def retry_on_throttle(max_retries: int = 3, base_backoff: float = 2.0):
     """
@@ -93,19 +113,19 @@ def retry_on_throttle(max_retries: int = 3, base_backoff: float = 2.0):
 
     Retry strategy:
         429 (Too Many Requests) → respect Retry-After header, up to max_retries
-        5xx (Server Error)      → exponential backoff (2^attempt * base_backoff seconds)
+        5xx (Server Error)      → exponential backoff (2^attempt * base_backoff)
         4xx (Client Error)      → fail immediately, no retry (except 429)
         Other exceptions        → exponential backoff, treat as transient
 
-    The decorator extracts status codes from several possible exception shapes:
-        - msgraph SDK exceptions with .status_code
+    The decorator reads status_code from:
+        - GraphClientError.status_code  (set by methods before re-raising)
+        - SDK exceptions with .status_code attribute
         - httpx.HTTPStatusError with .response.status_code
-        - Exception messages containing "429" or "503"
+        - String matching for 429/503/502 as a last resort
 
-    Usage:
-        @retry_on_throttle(max_retries=3, base_backoff=2.0)
-        def _some_graph_call(self):
-            return self._run(self._client.users.get())
+    This classification only works correctly if methods that catch SDK
+    exceptions and re-raise as GraphClientError preserve the status code.
+    See the status_code parameter on GraphClientError.
     """
     def decorator(func):
         @wraps(func)
@@ -120,7 +140,7 @@ def retry_on_throttle(max_retries: int = 3, base_backoff: float = 2.0):
                     last_exception = e
                     status_code = _extract_status_code(e)
 
-                    # 429 — Respect Retry-After header
+                    # 429 — Throttled: respect Retry-After
                     if status_code == 429:
                         retry_after = _extract_retry_after(e)
                         if attempt < max_retries - 1:
@@ -130,13 +150,11 @@ def retry_on_throttle(max_retries: int = 3, base_backoff: float = 2.0):
                             )
                             time.sleep(retry_after)
                             continue
-                        else:
-                            # Max retries exhausted on throttling
-                            raise GraphThrottlingError(
-                                f"Graph API throttling persisted after {max_retries} attempts: {e}"
-                            )
+                        raise GraphThrottlingError(
+                            f"Graph API throttling persisted after {max_retries} attempts: {e}"
+                        )
 
-                    # 5xx — Exponential backoff
+                    # 5xx — Server error: exponential backoff
                     if status_code and 500 <= status_code < 600:
                         if attempt < max_retries - 1:
                             backoff = base_backoff * (2 ** attempt)
@@ -146,20 +164,19 @@ def retry_on_throttle(max_retries: int = 3, base_backoff: float = 2.0):
                             )
                             time.sleep(backoff)
                             continue
-                        else:
-                            # Max retries exhausted on 5xx
-                            raise GraphClientError(
-                                f"Graph API server error persisted after {max_retries} attempts: {e}"
-                            )
+                        raise GraphClientError(
+                            f"Graph API server error persisted after {max_retries} attempts: {e}",
+                            status_code=status_code
+                        )
 
-                    # 4xx (except 429) — Permanent client error, no retry
-                    if status_code and 400 <= status_code < 500 and status_code != 429:
+                    # 4xx (except 429) — Client error: permanent, no retry
+                    if status_code and 400 <= status_code < 500:
                         logger.error(
                             f"Graph API client error ({status_code}) — no retry — {func.__name__}: {e}"
                         )
                         raise
 
-                    # Other exceptions — treat as transient, exponential backoff
+                    # Unknown exception — treat as transient: exponential backoff
                     if attempt < max_retries - 1:
                         backoff = base_backoff * (2 ** attempt)
                         logger.warning(
@@ -168,11 +185,9 @@ def retry_on_throttle(max_retries: int = 3, base_backoff: float = 2.0):
                         )
                         time.sleep(backoff)
                         continue
-                    else:
-                        # Max retries exhausted on unknown transient error
-                        raise
 
-            # If we exit the loop without returning, raise the last exception
+                    raise
+
             raise last_exception
 
         return wrapper
@@ -183,9 +198,16 @@ def _extract_status_code(exception: Exception) -> int | None:
     """
     Extract HTTP status code from various exception shapes.
 
-    The msgraph SDK, httpx, and aiohttp all raise exceptions with
-    different attribute names. This function normalises them.
+    Checks in priority order:
+        1. GraphClientError.status_code  — set explicitly before re-raising
+        2. SDK exception .status_code attribute
+        3. httpx .response.status_code
+        4. String matching for common codes as last resort
     """
+    # GraphClientError with status_code set by the method before re-raising
+    if isinstance(exception, GraphClientError) and exception.status_code is not None:
+        return exception.status_code
+
     # msgraph SDK exceptions
     if hasattr(exception, 'status_code'):
         return exception.status_code
@@ -194,7 +216,7 @@ def _extract_status_code(exception: Exception) -> int | None:
     if hasattr(exception, 'response') and hasattr(exception.response, 'status_code'):
         return exception.response.status_code
 
-    # Fall back to string matching for "429" or "503" in exception message
+    # String matching — last resort only
     exc_str = str(exception).lower()
     if "429" in exc_str or "too many requests" in exc_str:
         return 429
@@ -208,32 +230,31 @@ def _extract_status_code(exception: Exception) -> int | None:
 
 def _extract_retry_after(exception: Exception) -> int:
     """
-    Extract Retry-After value from a 429 response.
+    Extract Retry-After seconds from a 429 response.
 
-    Graph API returns this as an HTTP header. The SDK may expose it via
-    exception attributes or headers dict. If not found, default to 60 seconds.
+    Checks exception.headers and exception.response.headers.
+    Defaults to 60 seconds if the header is absent.
     """
-    # Check for headers dict on the exception
     if hasattr(exception, 'headers') and exception.headers:
-        retry_after = exception.headers.get('Retry-After') or exception.headers.get('retry-after')
-        if retry_after:
+        value = exception.headers.get('Retry-After') or exception.headers.get('retry-after')
+        if value:
             try:
-                return int(retry_after)
+                return int(value)
             except (ValueError, TypeError):
                 pass
 
-    # Check for response object with headers
     if hasattr(exception, 'response') and hasattr(exception.response, 'headers'):
-        retry_after = exception.response.headers.get('Retry-After') or exception.response.headers.get('retry-after')
-        if retry_after:
+        value = exception.response.headers.get('Retry-After') or exception.response.headers.get('retry-after')
+        if value:
             try:
-                return int(retry_after)
+                return int(value)
             except (ValueError, TypeError):
                 pass
 
-    # Default to 60 seconds if Retry-After header is missing
     return 60
 
+
+# Client construction
 
 def build_graph_client() -> tuple:
     """
@@ -263,6 +284,8 @@ def build_graph_client() -> tuple:
     return GraphServiceClient(credentials=credential), credential
 
 
+# Graph client
+
 class JmlGraphClient:
     """
     JML-scoped wrapper around GraphServiceClient.
@@ -275,6 +298,13 @@ class JmlGraphClient:
     GraphThrottlingError) on failure. The provisioner catches these and records
     which step failed without needing to know anything about the underlying SDK.
 
+    STATUS CODE PRESERVATION:
+    Methods that catch SDK exceptions and re-raise as GraphClientError must
+    call _extract_status_code() on the original exception and pass the result
+    as status_code= to GraphClientError. Without this the decorator loses
+    the ability to classify 4xx vs 5xx and will incorrectly retry permanent
+    client errors such as invalid domain (400) or unauthorised (401).
+
     Construct via:
         graph_service_client, credential = build_graph_client()
         client = JmlGraphClient(graph_service_client, credential)
@@ -282,15 +312,14 @@ class JmlGraphClient:
 
     def __init__(self, graph_client: GraphServiceClient, credential=None) -> None:
         self._client     = graph_client
-        self._credential = credential  # stored for direct HTTP calls needing a bearer token
+        self._credential = credential
 
     def _run(self, coroutine):
         """
         Run an async Graph SDK coroutine synchronously.
 
-        Tries the existing event loop first. If there isn't one (common in
-        a plain Python script or a fresh thread), creates a new one and
-        cleans it up after the call completes.
+        Tries the existing event loop first. If there is none (plain script
+        or fresh thread), creates one and cleans it up after the call.
         """
         try:
             return asyncio.get_event_loop().run_until_complete(coroutine)
@@ -306,16 +335,13 @@ class JmlGraphClient:
     def get_user(self, upn: str) -> dict:
         """
         Retrieve a user from Entra ID by UPN.
+
         Returns a dict with id, upn, display_name, account_enabled,
         department, and job_title.
 
-        Raises UserNotFoundError if the UPN does not exist — callers use
-        this to distinguish a missing user from a real API error.
-        Raises GraphClientError on any other failure.
-
-        Called by check_upn_exists() (validation_gate.py) before provisioning
-        and by the provisioner itself to detect retry scenarios where the user
-        was created but the object ID was never recorded.
+        Raises UserNotFoundError if the UPN does not exist.
+        Raises GraphClientError on any other failure, with status_code set
+        so the retry decorator can classify it correctly.
         """
         from msgraph.generated.users.item.user_item_request_builder import UserItemRequestBuilder
 
@@ -335,7 +361,7 @@ class JmlGraphClient:
             )
 
             if user is None:
-                raise UserNotFoundError(f"User not found: {upn}")
+                raise UserNotFoundError(f"User not found: {upn}", status_code=404)
 
             return {
                 "id":              user.id,
@@ -346,12 +372,13 @@ class JmlGraphClient:
                 "job_title":       user.job_title,
             }
 
-        except UserNotFoundError:
+        except (UserNotFoundError, GraphClientError):
             raise
         except Exception as e:
             if "not found" in str(e).lower() or "404" in str(e):
-                raise UserNotFoundError(f"User not found: {upn}")
-            raise GraphClientError(f"get_user failed for {upn}: {e}")
+                raise UserNotFoundError(f"User not found: {upn}", status_code=404)
+            status_code = _extract_status_code(e)
+            raise GraphClientError(f"get_user failed for {upn}: {e}", status_code=status_code)
 
     @retry_on_throttle(max_retries=3, base_backoff=2.0)
     def create_user(self, payload) -> dict:
@@ -359,18 +386,17 @@ class JmlGraphClient:
         Create a new Entra ID user from a canonical IdentityPayload.
 
         Returns a dict with the new user's Entra object id and upn.
-        Group and role assignments are handled separately by the provisioner —
-        this method only creates the user object.
+        Group and role assignments are handled separately by the provisioner.
 
-        usage_location is hardcoded to "GB" because Entra requires it before
-        a Microsoft 365 license can be assigned. Update this if the tenant
-        spans multiple regions.
+        usage_location is hardcoded to "GB". Update if the tenant spans
+        multiple regions with different licensing requirements.
 
         The temporary password is deterministic (derived from employee_id)
-        so a retry after a crash produces the same value — no confusion if
-        the user was created but the pipeline didn't finish recording it.
-        Must-change-on-first-login is enforced, so this value is never
-        long-lived.
+        so a retry after a crash produces the same value. Must-change-on-
+        first-login is enforced, so this value is never long-lived.
+
+        Raises GraphClientError with status_code set. A 400 here typically
+        means an invalid UPN domain — the retry decorator will not retry it.
         """
         try:
             temp_password = _generate_temp_password(payload.employee_id)
@@ -383,21 +409,16 @@ class JmlGraphClient:
             user.job_title           = payload.job_title
             user.department          = payload.department
             user.employee_id         = payload.employee_id
-            user.usage_location      = "GB"  # Required for M365 license assignment
+            user.usage_location      = "GB"
             user.employee_type       = payload.employment_type.value
 
-            password_profile                                  = PasswordProfile()
-            password_profile.password                         = temp_password
+            password_profile                                     = PasswordProfile()
+            password_profile.password                            = temp_password
             password_profile.force_change_password_next_sign_in = True
-            user.password_profile                             = password_profile
+            user.password_profile                                = password_profile
 
             created = self._run(self._client.users.post(user))
 
-            # Guard against a silent Graph API failure — the SDK can return None
-            # instead of raising if the call technically succeeded but returned
-            # no object. Raising here prevents an AttributeError on created.id
-            # and tells the provisioner to check Entra before deciding to retry,
-            # since the user may already exist in the tenant.
             if created is None:
                 raise GraphClientError(
                     f"create_user returned None for {payload.upn} — "
@@ -406,11 +427,16 @@ class JmlGraphClient:
                 )
 
             logger.info(f"User created — upn={payload.upn}, object_id={created.id}")
-
             return {"id": created.id, "upn": created.user_principal_name}
 
+        except GraphClientError:
+            raise
         except Exception as e:
-            raise GraphClientError(f"create_user failed for {payload.upn}: {e}")
+            status_code = _extract_status_code(e)
+            raise GraphClientError(
+                f"create_user failed for {payload.upn}: {e}",
+                status_code=status_code
+            )
 
     @retry_on_throttle(max_retries=3, base_backoff=2.0)
     def get_group(self, group_id: str) -> dict:
@@ -418,28 +444,31 @@ class JmlGraphClient:
         Retrieve a group by object ID.
 
         Returns group details including is_dynamic — the provisioner uses
-        this to skip manual membership assignment for dynamic groups, since
-        Entra manages their membership automatically via membership rules.
+        this to skip manual membership assignment for dynamic groups.
 
-        Raises GraphClientError if the group is not found.
+        Raises GraphClientError with status_code set.
         """
         try:
             group = self._run(self._client.groups.by_group_id(group_id).get())
 
             if group is None:
-                raise GraphClientError(f"Group not found: {group_id}")
+                raise GraphClientError(f"Group not found: {group_id}", status_code=404)
 
             return {
                 "id":              group.id,
                 "display_name":    group.display_name,
                 "membership_rule": group.membership_rule,
-                "is_dynamic":      bool(group.membership_rule),  # Dynamic groups have a rule; static ones don't
+                "is_dynamic":      bool(group.membership_rule),
             }
 
         except GraphClientError:
             raise
         except Exception as e:
-            raise GraphClientError(f"get_group failed for {group_id}: {e}")
+            status_code = _extract_status_code(e)
+            raise GraphClientError(
+                f"get_group failed for {group_id}: {e}",
+                status_code=status_code
+            )
 
     @retry_on_throttle(max_retries=3, base_backoff=2.0)
     def check_group_membership(self, user_id: str, group_id: str) -> bool:
@@ -447,8 +476,7 @@ class JmlGraphClient:
         Return True if the user is already a member of the group.
 
         Always called before add_group_member() to keep assignment idempotent.
-        If the pipeline retries after a partial run, this prevents the same
-        user being added twice (which would cause a Graph API conflict error).
+        Raises GraphClientError with status_code set.
         """
         try:
             members = self._run(
@@ -461,9 +489,13 @@ class JmlGraphClient:
                         return True
             return False
 
+        except GraphClientError:
+            raise
         except Exception as e:
+            status_code = _extract_status_code(e)
             raise GraphClientError(
-                f"check_group_membership failed — user={user_id}, group={group_id}: {e}"
+                f"check_group_membership failed — user={user_id}, group={group_id}: {e}",
+                status_code=status_code
             )
 
     @retry_on_throttle(max_retries=3, base_backoff=2.0)
@@ -472,8 +504,8 @@ class JmlGraphClient:
         Add a user to an Entra ID group.
 
         Only called after check_group_membership() confirms the user is
-        not already a member. The provisioner is responsible for that check —
-        this method does not guard against duplicates itself.
+        not already a member. Does not guard against duplicates itself.
+        Raises GraphClientError with status_code set.
         """
         try:
             ref          = ReferenceCreate()
@@ -487,9 +519,13 @@ class JmlGraphClient:
 
             logger.info(f"Group member added — user={user_id}, group={group_id}")
 
+        except GraphClientError:
+            raise
         except Exception as e:
+            status_code = _extract_status_code(e)
             raise GraphClientError(
-                f"add_group_member failed — user={user_id}, group={group_id}: {e}"
+                f"add_group_member failed — user={user_id}, group={group_id}: {e}",
+                status_code=status_code
             )
 
     @retry_on_throttle(max_retries=3, base_backoff=2.0)
@@ -502,9 +538,9 @@ class JmlGraphClient:
         """
         Return True if the RBAC role assignment already exists for this user.
 
-        Always called before create_rbac_assignment() for the same reason as
-        check_group_membership — prevents duplicate assignments on retry and
-        avoids a Graph conflict error if the pipeline crashed mid-run.
+        Always called before create_rbac_assignment() to prevent duplicate
+        assignments on retry.
+        Raises GraphClientError with status_code set.
         """
         try:
             assignments = self._run(
@@ -514,14 +550,20 @@ class JmlGraphClient:
             if assignments and assignments.value:
                 for assignment in assignments.value:
                     if (
-                        assignment.principal_id      == user_id
+                        assignment.principal_id       == user_id
                         and assignment.role_definition_id == role_definition_id
                     ):
                         return True
             return False
 
+        except GraphClientError:
+            raise
         except Exception as e:
-            raise GraphClientError(f"check_rbac_assignment failed — user={user_id}: {e}")
+            status_code = _extract_status_code(e)
+            raise GraphClientError(
+                f"check_rbac_assignment failed — user={user_id}: {e}",
+                status_code=status_code
+            )
 
     @retry_on_throttle(max_retries=3, base_backoff=2.0)
     def create_rbac_assignment(
@@ -534,17 +576,17 @@ class JmlGraphClient:
         Assign an Entra ID directory role to a user.
 
         Only called after check_rbac_assignment() confirms the assignment
-        does not already exist. The provisioner owns that check.
+        does not already exist.
 
         Inputs:
             user_id            — Entra object ID of the provisioned user
             role_definition_id — ID of the role definition to assign
             scope              — directory scope, typically "/" for tenant-wide
+
+        Raises GraphClientError with status_code set.
         """
         try:
-            from msgraph.generated.models.unified_role_assignment import (
-                UnifiedRoleAssignment
-            )
+            from msgraph.generated.models.unified_role_assignment import UnifiedRoleAssignment
 
             assignment                    = UnifiedRoleAssignment()
             assignment.principal_id       = user_id
@@ -560,8 +602,14 @@ class JmlGraphClient:
                 f"role={role_definition_id}, scope={scope}"
             )
 
+        except GraphClientError:
+            raise
         except Exception as e:
-            raise GraphClientError(f"create_rbac_assignment failed — user={user_id}: {e}")
+            status_code = _extract_status_code(e)
+            raise GraphClientError(
+                f"create_rbac_assignment failed — user={user_id}: {e}",
+                status_code=status_code
+            )
 
     @retry_on_throttle(max_retries=3, base_backoff=2.0)
     def assign_pim_group_eligibility(
@@ -573,20 +621,22 @@ class JmlGraphClient:
         """
         Add a user as an eligible member of a PIM-enabled security group.
 
-        Uses the Graph privilegedAccess group eligibility API (Entra ID P2 required).
+        Uses the Graph privilegedAccess group eligibility API (Entra ID P2).
         The group must already have an eligible Entra role assignment configured
         in PIM — this method only creates the user's eligible membership.
 
         Returns a dict with schedule_id on success.
-        Raises GraphClientError on failure.
         Treats 409 Conflict as success — eligibility already exists (idempotent).
 
-        Inputs:
-            user_id       — Entra object ID of the user being provisioned
-            group_id      — object ID of the role-assignable PIM group
-            justification — business reason written to the eligibility record
+        This method uses raw httpx rather than the SDK because the PIM
+        eligibility schedule endpoint is not fully modelled in the SDK.
+        Status codes are handled explicitly here rather than relying on
+        the decorator, since httpx raises differently from the SDK.
+
+        Raises GraphClientError on failure.
         """
         import json as _json
+        import httpx
 
         endpoint = (
             "https://graph.microsoft.com/v1.0"
@@ -608,12 +658,12 @@ class JmlGraphClient:
         }
 
         try:
-            import httpx
             if self._credential is None:
                 raise GraphClientError(
                     "No credential available for PIM HTTP call. "
                     "Ensure JmlGraphClient is constructed via build_graph_client()."
                 )
+
             token = self._credential.get_token("https://graph.microsoft.com/.default")
 
             response = httpx.post(
@@ -626,6 +676,7 @@ class JmlGraphClient:
                 timeout=30,
             )
 
+            # 409 — eligibility already exists, treat as success
             if response.status_code == 409:
                 logger.info(
                     f"PIM eligibility already exists (idempotent) — "
@@ -636,7 +687,8 @@ class JmlGraphClient:
             if response.status_code not in (200, 201):
                 raise GraphClientError(
                     f"PIM eligibility request failed — "
-                    f"status={response.status_code}, body={response.text[:300]}"
+                    f"status={response.status_code}, body={response.text[:300]}",
+                    status_code=response.status_code
                 )
 
             data        = response.json()
@@ -656,18 +708,20 @@ class JmlGraphClient:
             )
 
 
+# Helpers
+
 def _generate_temp_password(employee_id: str) -> str:
     """
-    Produce a temporary password for new user creation.
+    Produce a deterministic temporary password for new user creation.
 
-    Deterministic — the same employee_id always produces the same password.
-    This matters for retries: if the user was created but the pipeline crashed
-    before recording the object ID, a retry can call create_user() again with
+    The same employee_id always produces the same password. This matters
+    for retries: if the user was created but the pipeline crashed before
+    recording the object ID, a retry can call create_user() again with
     the same temp password rather than generating a new unknown value.
 
-    The password meets Entra ID complexity requirements (uppercase, lowercase,
-    digit, special character). force_change_password_next_sign_in is set to
-    True in create_user(), so this value is discarded after first login.
+    Meets Entra ID complexity requirements (uppercase, lowercase, digit,
+    special character). force_change_password_next_sign_in is set to True
+    in create_user(), so this value is discarded after first login.
     """
     import hashlib
     suffix = hashlib.sha256(employee_id.encode()).hexdigest()[:8].upper()
