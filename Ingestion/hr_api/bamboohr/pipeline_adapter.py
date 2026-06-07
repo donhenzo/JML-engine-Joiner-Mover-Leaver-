@@ -60,6 +60,9 @@ from Functions.Event_store.conflict_queue import (
 from Validation.validation_gate import pre_provision_validate, post_provision_validate
 from Provisioning.provisioner import provision_joiner
 from Provisioning.graph_client import JmlGraphClient
+from Functions.mover_http import run_mover_pipeline
+from Functions.Event_store.event_store import generate_event_id
+from azure.data.tables import TableServiceClient
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +98,7 @@ class PipelineContext:
             )
 
         # Shared infrastructure — built once
+        self.connection_string = connection_string
         self.hold_queue_client = get_hold_queue_table_client(connection_string)
         self.hold_queue = HoldQueueManager(
             AzureTableHoldQueueStore(self.hold_queue_client)
@@ -216,21 +220,86 @@ def run_single_record(mapped: dict, ctx: PipelineContext) -> bool:
     )
     normalised_payload = norm_result.payload
 
+    # Step 3 — Route by action
+    #
+    # Mover records go to run_mover_pipeline — the full 10-step Mover flow.
+    # Joiner records continue through the existing provisioning path below.
+    # Leaver is not yet implemented — falls through to the Joiner path
+    # and will be caught by the validation gate.
+
+    if normalised_payload.action == JmlAction.MOVER:
+        return _run_mover_record(normalised_payload, ctx)
+
+    return _run_joiner_record(normalised_payload, report, ctx)
+
+
+def _run_mover_record(
+    payload: IdentityPayload,
+    ctx: PipelineContext,
+) -> bool:
+    """
+    Route a Mover record to run_mover_pipeline.
+
+    Generates the deterministic event ID and builds the TableServiceClient
+    from the stored connection string. Returns True on MOVE_SUCCESS,
+    False on any other status.
+    """
+    event_id = generate_event_id(
+        payload.employee_id,
+        payload.action.value,
+        payload.start_date.isoformat(),
+    )
+
+    table_client = TableServiceClient.from_connection_string(
+        ctx.connection_string
+    )
+
+    result = run_mover_pipeline(
+        payload      = payload,
+        event_id     = event_id,
+        table_client = table_client,
+        graph_client = ctx.graph_client,
+    )
+
+    final_status = result.get("final_status", "MOVE_FAILED")
+
+    logger.info(
+        "Mover pipeline result — employee=%s, status=%s",
+        payload.employee_id, final_status,
+    )
+
+    return final_status == "MOVE_SUCCESS"
+
+
+def _run_joiner_record(
+    normalised_payload: IdentityPayload,
+    report: DecisionReport,
+    ctx: PipelineContext,
+) -> bool:
+    """
+    Run a Joiner record through the existing provisioning path.
+
+    This is the original run_single_record() logic from Step 3 onwards,
+    extracted into its own function so the Mover routing branch is clean.
+    """
+    employee_id = normalised_payload.employee_id
+    event_id_str = ""
+
     # Step 3 — Claim event (idempotency guard)
     payload_json = json.dumps({
         "employee_id": normalised_payload.employee_id,
-        "upn": normalised_payload.upn,
-        "action": normalised_payload.action.value,
-        "start_date": normalised_payload.start_date.isoformat(),
+        "upn":         normalised_payload.upn,
+        "action":      normalised_payload.action.value,
+        "start_date":  normalised_payload.start_date.isoformat(),
     })
 
     claimed = claim_event(
-        table_client=ctx.events_client,
-        employee_id=normalised_payload.employee_id,
-        action=normalised_payload.action.value,
-        start_date=normalised_payload.start_date.isoformat(),
-        payload_json=payload_json,
-        correlation_id=ctx.correlation_id,
+        table_client   = ctx.events_client,
+        employee_id    = normalised_payload.employee_id,
+        action         = normalised_payload.action.value,
+        start_date     = normalised_payload.start_date.isoformat(),
+        payload_json   = payload_json,
+        correlation_id = ctx.correlation_id,
     )
 
     if not claimed:
@@ -238,14 +307,14 @@ def run_single_record(mapped: dict, ctx: PipelineContext) -> bool:
             "Duplicate event — skipping — employee=%s", employee_id
         )
         report.add_action(
-            action="DuplicateEventSkipped",
-            detail="Event already exists in event store — idempotency exit",
-            succeeded=True,
+            action    = "DuplicateEventSkipped",
+            detail    = "Event already exists in event store — idempotency exit",
+            succeeded = True,
         )
         _write_report(report, ctx.output_dir)
         return True
 
-    event_id = generate_event_id(
+    event_id_str = generate_event_id(
         normalised_payload.employee_id,
         normalised_payload.action.value,
         normalised_payload.start_date.isoformat(),
@@ -253,17 +322,17 @@ def run_single_record(mapped: dict, ctx: PipelineContext) -> bool:
 
     # Step 4 — Conflict check
     conflict_outcome = check_and_handle_conflict(
-        table_client=ctx.events_client,
-        employee_id=normalised_payload.employee_id,
-        new_event_id=event_id,
-        new_action=normalised_payload.action.value,
+        table_client = ctx.events_client,
+        employee_id  = normalised_payload.employee_id,
+        new_event_id = event_id_str,
+        new_action   = normalised_payload.action.value,
     )
 
     if conflict_outcome == ConflictOutcome.QUEUED:
         report.add_action(
-            action="EventQueued",
-            detail="Active event in progress — queued behind existing event",
-            succeeded=True,
+            action    = "EventQueued",
+            detail    = "Active event in progress — queued behind existing event",
+            succeeded = True,
         )
         report.add_warning(
             "Event queued — will process after active event completes"
@@ -273,21 +342,21 @@ def run_single_record(mapped: dict, ctx: PipelineContext) -> bool:
 
     # Step 5 — Resolve entitlements
     entitlements = resolve_entitlements(
-        rules=mapping_rules_from_ctx(ctx),
-        department=normalised_payload.department,
-        job_title=normalised_payload.job_title,
-        employment_type=normalised_payload.employment_type.value,
-        employee_id=normalised_payload.employee_id,
+        rules           = mapping_rules_from_ctx(ctx),
+        department      = normalised_payload.department,
+        job_title       = normalised_payload.job_title,
+        employment_type = normalised_payload.employment_type.value,
+        employee_id     = normalised_payload.employee_id,
     )
 
     report.add_action(
-        action="EntitlementsResolved",
-        detail=(
+        action    = "EntitlementsResolved",
+        detail    = (
             f"matched_rules={entitlements.matched_rule_ids}, "
             f"groups={entitlements.groups}, "
             f"rbac_roles={len(entitlements.rbac_roles)}"
         ),
-        succeeded=True,
+        succeeded = True,
     )
 
     if not entitlements.matched_rule_ids:
@@ -305,17 +374,17 @@ def run_single_record(mapped: dict, ctx: PipelineContext) -> bool:
             report.add_hold_reason(failure)
 
         hold_record = ctx.hold_queue.create_from_validation_failure(
-            payload=normalised_payload,
-            reasons=validation_result.failure_summary(),
+            payload = normalised_payload,
+            reasons = validation_result.failure_summary(),
         )
         report.hold_record_id = hold_record.record_id
 
         update_event_status(
-            table_client=ctx.events_client,
-            employee_id=normalised_payload.employee_id,
-            event_id=event_id,
-            status=EventStatus.FAILED,
-            failure_step="PreProvisionValidation",
+            table_client = ctx.events_client,
+            employee_id  = normalised_payload.employee_id,
+            event_id     = event_id_str,
+            status       = EventStatus.FAILED,
+            failure_step = "PreProvisionValidation",
         )
         _write_report(report, ctx.output_dir)
         return False
@@ -327,16 +396,16 @@ def run_single_record(mapped: dict, ctx: PipelineContext) -> bool:
     # Step 7 — Guard: Graph client required
     if ctx.graph_client is None:
         report.add_action(
-            action="ProvisioningSkipped",
-            detail="Graph client not available — check credentials",
-            succeeded=False,
+            action    = "ProvisioningSkipped",
+            detail    = "Graph client not available — check credentials",
+            succeeded = False,
         )
         update_event_status(
-            table_client=ctx.events_client,
-            employee_id=normalised_payload.employee_id,
-            event_id=event_id,
-            status=EventStatus.FAILED,
-            failure_step="GraphClientUnavailable",
+            table_client = ctx.events_client,
+            employee_id  = normalised_payload.employee_id,
+            event_id     = event_id_str,
+            status       = EventStatus.FAILED,
+            failure_step = "GraphClientUnavailable",
         )
         _write_report(report, ctx.output_dir)
         return False
@@ -345,53 +414,53 @@ def run_single_record(mapped: dict, ctx: PipelineContext) -> bool:
     instance_id = str(uuid.uuid4())
     acquire_lock(
         ctx.events_client, normalised_payload.employee_id,
-        event_id, instance_id
+        event_id_str, instance_id,
     )
 
     provisioning_result = provision_joiner(
-        payload=normalised_payload,
-        entitlements=entitlements,
-        report=report,
-        graph_client=ctx.graph_client,
-        event_status=EventStatus.PROCESSING,
+        payload      = normalised_payload,
+        entitlements = entitlements,
+        report       = report,
+        graph_client = ctx.graph_client,
+        event_status = EventStatus.PROCESSING,
     )
 
     if not provisioning_result.succeeded:
         release_lock(
-            ctx.events_client, normalised_payload.employee_id, event_id
+            ctx.events_client, normalised_payload.employee_id, event_id_str
         )
         update_event_status(
-            table_client=ctx.events_client,
-            employee_id=normalised_payload.employee_id,
-            event_id=event_id,
-            status=EventStatus.FAILED,
-            failure_step=provisioning_result.failure_step,
+            table_client = ctx.events_client,
+            employee_id  = normalised_payload.employee_id,
+            event_id     = event_id_str,
+            status       = EventStatus.FAILED,
+            failure_step = provisioning_result.failure_step,
         )
         _write_report(report, ctx.output_dir)
         return False
 
     # Step 9 — Post-provision validation
     post_result = post_provision_validate(
-        entra_object_id=provisioning_result.entra_id,
-        employee_id=normalised_payload.employee_id,
+        entra_object_id = provisioning_result.entra_id,
+        employee_id     = normalised_payload.employee_id,
     )
 
     if not post_result.passed:
         report.validation_status = ValidationStatus.FAILED
         report.add_action(
-            action="PostProvisionValidationFailed",
-            detail=f"failures={post_result.failure_summary()}",
-            succeeded=False,
+            action    = "PostProvisionValidationFailed",
+            detail    = f"failures={post_result.failure_summary()}",
+            succeeded = False,
         )
         release_lock(
-            ctx.events_client, normalised_payload.employee_id, event_id
+            ctx.events_client, normalised_payload.employee_id, event_id_str
         )
         update_event_status(
-            table_client=ctx.events_client,
-            employee_id=normalised_payload.employee_id,
-            event_id=event_id,
-            status=EventStatus.FAILED,
-            failure_step="PostProvisionValidation",
+            table_client = ctx.events_client,
+            employee_id  = normalised_payload.employee_id,
+            event_id     = event_id_str,
+            status       = EventStatus.FAILED,
+            failure_step = "PostProvisionValidation",
         )
         _write_report(report, ctx.output_dir)
         return False
@@ -401,23 +470,22 @@ def run_single_record(mapped: dict, ctx: PipelineContext) -> bool:
 
     # Step 10 — Success
     release_lock(
-        ctx.events_client, normalised_payload.employee_id, event_id
+        ctx.events_client, normalised_payload.employee_id, event_id_str
     )
     update_event_status(
-        table_client=ctx.events_client,
-        employee_id=normalised_payload.employee_id,
-        event_id=event_id,
-        status=EventStatus.COMPLETED,
+        table_client = ctx.events_client,
+        employee_id  = normalised_payload.employee_id,
+        event_id     = event_id_str,
+        status       = EventStatus.COMPLETED,
     )
 
     _write_report(report, ctx.output_dir)
 
     logger.info(
         "Record processed successfully — employee=%s, upn=%s, action=%s",
-        employee_id, upn, action_str
+        employee_id, normalised_payload.upn, normalised_payload.action.value,
     )
     return True
-
 
 def mapping_rules_from_ctx(ctx: PipelineContext):
     """Return the mapping rules from the context."""

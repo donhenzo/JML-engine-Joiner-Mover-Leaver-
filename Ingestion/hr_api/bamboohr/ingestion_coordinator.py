@@ -44,6 +44,7 @@ from Ingestion.hr_api.system_state import (
 )
 from Ingestion.hr_api.bamboohr.pipeline_adapter import PipelineContext, run_single_record
 
+
 logger = logging.getLogger(__name__)
 
 

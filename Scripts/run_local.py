@@ -4,23 +4,17 @@ scripts/run_local.py
 
 Local CLI runner for the JML pipeline.
 
-WHY THIS EXISTS:
-    The pipeline logic lives in run_pipeline() — pure Python with no Azure
-    SDK dependency. This script wires it to the command line and handles the
-    one thing the Azure Functions runtime normally does automatically: loading
-    local.settings.json into the environment before the pipeline reads it.
-
 USAGE:
-    # CSV mode (existing, unchanged)
+    # Joiner CSV mode
     python scripts/run_local.py --csv Data/sample_joiners.csv --clean
 
-    # API mode — single employee by employee number, UPN, or BambooHR ID
+    # Mover CSV mode
+    python scripts/run_local.py --source mover --csv Data/sample_movers.csv --clean
+
+    # API mode — single employee
     python scripts/run_local.py --source api --id Acc003
 
-    # API mode — multiple employees
-    python scripts/run_local.py --source api --id Acc003,Acc004,Acc005,Acc006,Acc007,Acc008
-
-    # API mode — delta poll (process all changes since last checkpoint)
+    # API mode — delta poll
     python scripts/run_local.py --source api --mode delta
 """
 from __future__ import annotations
@@ -29,7 +23,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -42,21 +36,10 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(levelname)-8s %(name)s — %(message)s",
 )
-# Azure SDK logs at INFO level are noisy — keep them quiet unless something breaks
 logging.getLogger("azure").setLevel(logging.WARNING)
 
 
 def load_local_settings(settings_path: str = "local.settings.json") -> None:
-    """
-    Inject local.settings.json values into os.environ before the pipeline runs.
-
-    Azure Functions loads this file automatically at runtime. This function
-    replicates that behaviour for plain Python execution so connection strings
-    and config are available to the pipeline.
-
-    Only sets keys not already in the environment — real env vars always win.
-    Does nothing if the file is missing, so this is safe to call unconditionally.
-    """
     path = Path(settings_path)
     if not path.exists():
         logging.getLogger(__name__).warning(
@@ -72,23 +55,11 @@ def load_local_settings(settings_path: str = "local.settings.json") -> None:
 
 
 def check_validation_engine() -> bool:
-    """
-    Ping the validation engine before the pipeline runs and warn if unreachable.
-
-    A missing validation engine does not abort the run — records will still be
-    processed up to the validation step, then held. This gives the operator a
-    clear heads-up rather than letting records fail silently mid-run.
-
-    Returns True if the engine is reachable, False if not.
-    """
     url = os.environ.get("JML_VALIDATION_ENGINE_URL", "")
     if not url:
         print("⚠  JML_VALIDATION_ENGINE_URL not set in local.settings.json")
         return False
-
     try:
-        # We only need to know the host is listening — a POST with an empty
-        # body is enough. The response code does not matter here.
         requests.post(url, json={}, timeout=3)
         return True
     except requests.ConnectionError:
@@ -104,17 +75,10 @@ def check_validation_engine() -> bool:
         print()
         return False
     except Exception:
-        # Any other error — engine may still work, do not block the run
         return True
 
 
 def clean_reports(output_dir: str) -> None:
-    """
-    Remove all JSON files from the reports directory before a fresh run.
-
-    Called when --clean is passed. Prevents old reports from a previous run
-    mixing with the current run's output in the per-record listing.
-    """
     output_path = Path(output_dir)
     if not output_path.exists():
         return
@@ -128,17 +92,12 @@ def clean_reports(output_dir: str) -> None:
 
 
 def _format_time_ago(timestamp_str: str) -> str:
-    """
-    Convert an ISO timestamp to a human-readable 'X hours ago' string.
-    Shows the operator when the last poll ran in terms they can understand.
-    """
     try:
         ts = datetime.fromisoformat(timestamp_str)
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         delta = datetime.now(timezone.utc) - ts
         hours = delta.total_seconds() / 3600
-
         if hours < 1:
             minutes = int(delta.total_seconds() / 60)
             return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
@@ -152,16 +111,168 @@ def _format_time_ago(timestamp_str: str) -> str:
         return "unknown"
 
 
-def run_api_mode(args) -> int:
+def run_mover_csv_mode(args) -> int:
     """
-    Run the pipeline in API mode — fetch from BambooHR, derive actions,
-    and process through the pipeline.
+    Run the Mover pipeline against a CSV file.
 
-    Returns exit code: 0 for clean run, 1 if any records were held/failed.
+    Parses the CSV, normalises each record, and routes MOVER action
+    records to run_mover_pipeline(). JOINER and LEAVER records in the
+    same file are skipped with a warning — use the Joiner CSV path for those.
+
+    Returns exit code: 0 for clean run, 1 if any records failed or were held.
     """
+    from Ingestion.csv_parser import parse_csv
+    from Ingestion.schema import IdentityPayload, EmploymentType, JmlAction
+    from Normalization.lookup_loader import load_lookup_table
+    from Normalization.normalizer import Normalizer
     from Provisioning.graph_client import build_graph_client, JmlGraphClient
-    from Ingestion.hr_api.pipeline_adapter import PipelineContext
-    from Ingestion.hr_api.ingestion_coordinator import run_single, run_delta
+    from Functions.Event_store.event_store import generate_event_id
+    from Functions.mover_http import run_mover_pipeline
+    from azure.data.tables import TableServiceClient
+
+    print(f"  Source:  Mover CSV")
+    print(f"  CSV:     {args.csv}")
+    print(f"  Lookup:  {args.lookup}")
+    print(f"  Reports: {args.output}")
+    print("=" * 60)
+    print()
+
+    conn_str = os.environ.get("JML_STORAGE_CONNECTION_STRING", "") or \
+               os.environ.get("AzureWebJobsStorage", "")
+
+    if not conn_str:
+        print("✗  Storage connection string not set.")
+        print("   Set JML_STORAGE_CONNECTION_STRING in local.settings.json")
+        return 1
+
+    # Build clients once for the entire run
+    try:
+        graph_service, credential = build_graph_client()
+        graph_client = JmlGraphClient(graph_service, credential)
+    except Exception as e:
+        print(f"✗  Failed to build Graph client: {e}")
+        return 1
+
+    table_client = TableServiceClient.from_connection_string(conn_str)
+
+    lookup     = load_lookup_table(args.lookup)
+    normalizer = Normalizer(lookup)
+
+    csv_content  = Path(args.csv).read_text(encoding="utf-8-sig")
+    parse_result = parse_csv(csv_content)
+
+    if parse_result.rejected_rows:
+        print(f"  ⚠  {len(parse_result.rejected_rows)} CSV row(s) rejected at parse:")
+        for row in parse_result.rejected_rows:
+            print(f"     → {row.get('EmployeeId', 'unknown')}: "
+                  f"{row.get('rejection_reason', 'parse error')}")
+        print()
+
+    total     = 0
+    succeeded = 0
+    held      = 0
+    failed    = 0
+
+    for raw_row in parse_result.valid_rows:
+
+        # Construct IdentityPayload
+        try:
+            payload = IdentityPayload(
+                employee_id     = raw_row.employee_id,
+                upn             = raw_row.upn,
+                display_name    = raw_row.display_name,
+                department      = raw_row.department_raw,
+                job_title       = raw_row.job_title_raw,
+                manager_id      = raw_row.manager_id,
+                start_date      = raw_row.start_date,
+                employment_type = EmploymentType(raw_row.employment_type_raw),
+                location        = raw_row.location,
+                action          = JmlAction(raw_row.action_raw),
+                retain_roles    = raw_row.retain_roles,
+                retain_list     = raw_row.retain_list,
+            )
+        except ValueError as e:
+            print(f"  ✗  {raw_row.employee_id} — payload construction failed: {e}")
+            total  += 1
+            failed += 1
+            continue
+
+        # Skip non-Mover records
+        if payload.action != JmlAction.MOVER:
+            print(f"  ⚠  {payload.employee_id} — action={payload.action.value} "
+                  f"skipped (use Joiner CSV path for non-Mover records)")
+            continue
+
+        # Normalise
+        norm_result = normalizer.normalize(payload)
+        if not norm_result.passed:
+            print(f"  ✗  {payload.employee_id} ({payload.upn}) — "
+                  f"normalisation failed: {norm_result.failures}")
+            total  += 1
+            held   += 1
+            continue
+
+        normalised_payload = norm_result.payload
+
+        # Generate deterministic event ID
+        event_id = generate_event_id(
+            normalised_payload.employee_id,
+            normalised_payload.action.value,
+            normalised_payload.start_date.isoformat(),
+        )
+
+        print(f"  ▸ Processing: {normalised_payload.employee_id} "
+              f"({normalised_payload.upn})")
+        print(f"    Move: {normalised_payload.department} / "
+              f"{normalised_payload.job_title}")
+        print(f"    EventId: {event_id}")
+
+        # Run the Mover pipeline
+        try:
+            result = run_mover_pipeline(
+                payload      = normalised_payload,
+                event_id     = event_id,
+                table_client = table_client,
+                graph_client = graph_client,
+            )
+
+            status = result.get("final_status", "UNKNOWN")
+            summary = result.get("summary", "")
+
+            if status == "MOVE_SUCCESS":
+                print(f"    ✓ {status}")
+                succeeded += 1
+            elif status in ("HOLD_FOR_REVIEW", "QUEUED_CONCURRENT"):
+                print(f"    ⚠ {status} — {summary}")
+                held += 1
+            else:
+                print(f"    ✗ {status} — {summary}")
+                failed += 1
+
+        except Exception as e:
+            print(f"    ✗ Pipeline error: {e}")
+            failed += 1
+
+        total += 1
+        print()
+
+    print("=" * 60)
+    print("  Mover Run Complete")
+    print("=" * 60)
+    print(f"  Total processed : {total}")
+    print(f"  Succeeded       : {succeeded}")
+    print(f"  Held            : {held}")
+    print(f"  Failed          : {failed}")
+    print("=" * 60)
+    print()
+
+    return 1 if (held > 0 or failed > 0) else 0
+
+
+def run_api_mode(args) -> int:
+    from Provisioning.graph_client import build_graph_client, JmlGraphClient
+    from Ingestion.hr_api.bamboohr.pipeline_adapter import PipelineContext
+    from Ingestion.hr_api.bamboohr.ingestion_coordinator import run_single, run_delta
     from Ingestion.hr_api.system_state import (
         get_system_state_table_client,
         get_poll_checkpoint,
@@ -172,7 +283,6 @@ def run_api_mode(args) -> int:
         print("✗  AzureWebJobsStorage not set — cannot connect to Azure Table Storage.")
         return 1
 
-    # Build Graph client once for the entire run
     try:
         graph_service, credential = build_graph_client()
         graph_client = JmlGraphClient(graph_service, credential)
@@ -180,25 +290,24 @@ def run_api_mode(args) -> int:
         print(f"✗  Failed to build Graph client: {e}")
         return 1
 
-    # Build pipeline context — shared across all records
     ctx = PipelineContext(
-        graph_client=graph_client,
-        connection_string=conn_str,
-        output_dir=args.output,
-        correlation_id="api-run",
+        graph_client     = graph_client,
+        connection_string= conn_str,
+        output_dir       = args.output,
+        correlation_id   = "api-run",
     )
 
     if args.mode == "delta":
-        # Delta poll mode — process changes since last checkpoint
         state_client = get_system_state_table_client(conn_str)
-        checkpoint = get_poll_checkpoint(state_client)
-        time_ago = _format_time_ago(checkpoint.last_successful_poll)
+        checkpoint   = get_poll_checkpoint(state_client)
+        time_ago     = _format_time_ago(checkpoint.last_successful_poll)
 
         print(f"  Mode:    Delta poll")
         print(f"  Since:   {checkpoint.last_successful_poll}")
         print(f"           ({time_ago})")
         if checkpoint.last_run_status:
-            print(f"  Last:    {checkpoint.last_run_status} ({checkpoint.records_processed} records)")
+            print(f"  Last:    {checkpoint.last_run_status} "
+                  f"({checkpoint.records_processed} records)")
         print("=" * 60)
         print()
 
@@ -221,27 +330,21 @@ def run_api_mode(args) -> int:
 
         print("=" * 60)
         print()
-
         return 1 if result.failed_count > 0 else 0
 
     else:
-        # Single/batch mode — process specific employee IDs
         if not args.id:
-            print("✗  --id is required in single mode. Provide employee number(s), UPN(s), or BambooHR ID(s).")
-            print("   Example: --id Acc003,Acc004,Acc005")
+            print("✗  --id is required in single mode.")
             return 1
 
         identifiers = [x.strip() for x in args.id.split(",") if x.strip()]
 
         print(f"  Mode:    Single/batch")
         print(f"  IDs:     {', '.join(identifiers)}")
-        print(f"  Count:   {len(identifiers)}")
         print("=" * 60)
         print()
 
-        succeeded = 0
-        held = 0
-        failed = 0
+        succeeded = failed = 0
 
         for identifier in identifiers:
             print(f"  ▸ Processing: {identifier}")
@@ -251,41 +354,24 @@ def run_api_mode(args) -> int:
                 print(f"    ✗ Fetch failed or skipped")
                 failed += 1
             elif not result.get("_pipeline_success", False):
-                emp_id = result.get("employee_id", "")
-                upn = result.get("upn", "")
-                action = result.get("action", "")
-                print(f"    ⚠ {emp_id} ({upn}) — {action} — held or rejected")
+                print(f"    ⚠ {result.get('employee_id', '')} — held or rejected")
                 failed += 1
             else:
-                action = result.get("action", "")
-                emp_id = result.get("employee_id", "")
-                upn = result.get("upn", "")
-                print(f"    ✓ {emp_id} ({upn}) — {action}")
+                print(f"    ✓ {result.get('employee_id', '')} — "
+                      f"{result.get('action', '')}")
                 succeeded += 1
-
             print()
 
-        total = succeeded + held + failed
-
         print("=" * 60)
-        print("  Batch Complete")
-        print("=" * 60)
-        print(f"  Total processed : {total}")
-        print(f"  Succeeded       : {succeeded}")
-        print(f"  Failed/Skipped  : {failed}")
+        print(f"  Total: {succeeded + failed} | "
+              f"Succeeded: {succeeded} | Failed: {failed}")
         print("=" * 60)
         print()
-
         return 1 if failed > 0 else 0
 
 
 def run_csv_mode(args) -> int:
-    """
-    Run the pipeline in CSV mode — the original path, unchanged.
-
-    Returns exit code: 0 for clean run, 1 if any records were held.
-    """
-    print(f"  Source:  CSV")
+    print(f"  Source:  Joiner CSV")
     print(f"  CSV:     {args.csv}")
     print(f"  Lookup:  {args.lookup}")
     print(f"  Reports: {args.output}")
@@ -293,10 +379,10 @@ def run_csv_mode(args) -> int:
     print()
 
     result = run_pipeline(
-        csv_path=args.csv,
-        lookup_path=args.lookup,
-        output_dir=args.output,
-        correlation_id="local-run",
+        csv_path       = args.csv,
+        lookup_path    = args.lookup,
+        output_dir     = args.output,
+        correlation_id = "local-run",
     )
 
     print()
@@ -309,7 +395,6 @@ def run_csv_mode(args) -> int:
     print(f"  Failed          : {result.failed}")
 
     if result.errors:
-        print(f"  Audit errors    : {len(result.errors)}")
         for err in result.errors:
             print(f"    ✗ {err}")
 
@@ -322,7 +407,6 @@ def run_csv_mode(args) -> int:
 
 
 def print_reports(output_dir: str) -> None:
-    """Print a summary of all audit reports written during the run."""
     output_path = Path(output_dir)
     if not output_path.exists():
         return
@@ -345,18 +429,6 @@ def print_reports(output_dir: str) -> None:
                     print(f"        → {reason}")
         except (json.JSONDecodeError, KeyError):
             print(f"    ? {r.name} (could not parse)")
-
-    summaries = sorted(output_path.glob("_run_summary_*.json"))
-    if summaries:
-        print()
-        latest = summaries[-1]
-        try:
-            with latest.open() as f:
-                summary = json.load(f)
-            print(f"  Run summary: {latest.name}")
-        except (json.JSONDecodeError, KeyError):
-            pass
-
     print()
 
 
@@ -368,24 +440,24 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  CSV mode (default):
+  Joiner CSV:
     python scripts/run_local.py --csv Data/sample_joiners.csv --clean
 
-  API mode — single employee:
+  Mover CSV:
+    python scripts/run_local.py --source mover --csv Data/sample_movers.csv --clean
+
+  API single:
     python scripts/run_local.py --source api --id Acc003
 
-  API mode — batch:
-    python scripts/run_local.py --source api --id Acc003,Acc004,Acc005
-
-  API mode — delta poll:
+  API delta:
     python scripts/run_local.py --source api --mode delta
         """,
     )
     parser.add_argument(
         "--source",
-        choices=["csv", "api"],
+        choices=["csv", "mover", "api"],
         default="csv",
-        help="Input source: 'csv' for HR CSV file, 'api' for BambooHR API",
+        help="Input source: 'csv' for Joiner CSV, 'mover' for Mover CSV, 'api' for BambooHR",
     )
     parser.add_argument(
         "--mode",
@@ -396,12 +468,12 @@ Examples:
     parser.add_argument(
         "--id",
         default="",
-        help="Comma-separated employee numbers, UPNs, or BambooHR IDs (API single mode)",
+        help="Comma-separated employee IDs (API single mode)",
     )
     parser.add_argument(
         "--csv",
         default="Data/sample_joiners.csv",
-        help="Path to the HR CSV file (CSV mode)",
+        help="Path to the HR CSV file",
     )
     parser.add_argument(
         "--lookup",
@@ -428,16 +500,17 @@ Examples:
     if args.clean:
         clean_reports(args.output)
 
-    # Warn if the validation engine is unreachable
     check_validation_engine()
 
     if args.source == "api":
         exit_code = run_api_mode(args)
+    elif args.source == "mover":
+        exit_code = run_mover_csv_mode(args)
     else:
         exit_code = run_csv_mode(args)
 
-    # Print report listing for both modes
-    print_reports(args.output)
+    if args.source != "mover":
+        print_reports(args.output)
 
     sys.exit(exit_code)
 

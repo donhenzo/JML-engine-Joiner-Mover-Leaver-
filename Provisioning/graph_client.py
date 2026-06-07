@@ -707,6 +707,173 @@ class JmlGraphClient:
                 f"user={user_id}, group={group_id}: {e}"
             )
 
+    @retry_on_throttle(max_retries=3, base_backoff=2.0)
+    def remove_pim_group_eligibility(
+        self,
+        user_id:       str,
+        group_id:      str,
+        justification: str,
+    ) -> dict:
+        """
+        Remove a user's eligible membership from a PIM-enabled security group.
+
+        Mirrors assign_pim_group_eligibility() but uses action: "adminRemove".
+        Only removes the eligible assignment — active sessions are left to
+        expire naturally per ADR-003.
+
+        Returns a dict with schedule_id of the removal request on success.
+        Treats 404 as success — eligibility does not exist, nothing to remove
+        (idempotent).
+
+        Raises GraphClientError on failure.
+        """
+        import json as _json
+        import httpx
+
+        endpoint = (
+            "https://graph.microsoft.com/v1.0"
+            "/identityGovernance/privilegedAccess/group/eligibilityScheduleRequests"
+        )
+
+        body = {
+            "accessId":      "member",
+            "principalId":   user_id,
+            "groupId":       group_id,
+            "action":        "adminRemove",
+            "justification": justification,
+            "scheduleInfo": {
+                "expiration": {
+                    "type": "noExpiration"
+                }
+            },
+        }
+
+        try:
+            if self._credential is None:
+                raise GraphClientError(
+                    "No credential available for PIM HTTP call. "
+                    "Ensure JmlGraphClient is constructed via build_graph_client()."
+                )
+
+            token = self._credential.get_token("https://graph.microsoft.com/.default")
+
+            response = httpx.post(
+                endpoint,
+                headers={
+                    "Authorization": f"Bearer {token.token}",
+                    "Content-Type":  "application/json",
+                },
+                json=body,
+                timeout=30,
+            )
+
+            # 404 — eligibility does not exist, nothing to remove — treat as success
+            if response.status_code == 404:
+                logger.info(
+                    f"PIM eligibility not found — nothing to remove (idempotent) — "
+                    f"user={user_id}, group={group_id}"
+                )
+                return {"schedule_id": "", "already_absent": True}
+
+            if response.status_code not in (200, 201):
+                raise GraphClientError(
+                    f"PIM eligibility removal failed — "
+                    f"status={response.status_code}, body={response.text[:300]}",
+                    status_code=response.status_code
+                )
+
+            data        = response.json()
+            schedule_id = data.get("id", "")
+            logger.info(
+                f"PIM eligibility removed — user={user_id}, "
+                f"group={group_id}, schedule={schedule_id}"
+            )
+            return {"schedule_id": schedule_id, "already_absent": False}
+
+        except GraphClientError:
+            raise
+        except Exception as e:
+            raise GraphClientError(
+                f"remove_pim_group_eligibility failed — "
+                f"user={user_id}, group={group_id}: {e}"
+            )
+
+    @retry_on_throttle(max_retries=3, base_backoff=2.0)
+    def get_active_pim_sessions(
+        self,
+        user_id:  str,
+        group_id: str,
+    ) -> list[dict]:
+        """
+        Check whether an active PIM session exists for this user and group.
+
+        Queries eligibilityScheduleInstances — these represent active,
+        time-bounded PIM activations currently in progress.
+
+        Returns a list of active session dicts. Empty list means no active
+        session. Each dict carries group_id, role, and expiry timestamp.
+
+        This is a READ ONLY call. It never cancels or modifies sessions.
+        Per ADR-003, active sessions are allowed to expire naturally.
+        The result goes to the audit trail only.
+
+        Raises GraphClientError on failure.
+        """
+        import httpx
+
+        endpoint = (
+            f"https://graph.microsoft.com/v1.0"
+            f"/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances"
+            f"?$filter=principalId eq '{user_id}' and groupId eq '{group_id}'"
+        )
+
+        try:
+            if self._credential is None:
+                raise GraphClientError(
+                    "No credential available for PIM HTTP call. "
+                    "Ensure JmlGraphClient is constructed via build_graph_client()."
+                )
+
+            token = self._credential.get_token("https://graph.microsoft.com/.default")
+
+            response = httpx.get(
+                endpoint,
+                headers={"Authorization": f"Bearer {token.token}"},
+                timeout=30,
+            )
+
+            if response.status_code == 404:
+                return []
+
+            if response.status_code != 200:
+                raise GraphClientError(
+                    f"get_active_pim_sessions failed — "
+                    f"status={response.status_code}, body={response.text[:300]}",
+                    status_code=response.status_code
+                )
+
+            data     = response.json()
+            sessions = data.get("value", [])
+
+            return [
+                {
+                    "group_id":   item.get("groupId", ""),
+                    "access_id":  item.get("accessId", ""),
+                    "end_date":   item.get("scheduleInfo", {})
+                                     .get("expiration", {})
+                                     .get("endDateTime", ""),
+                }
+                for item in sessions
+            ]
+
+        except GraphClientError:
+            raise
+        except Exception as e:
+            raise GraphClientError(
+                f"get_active_pim_sessions failed — "
+                f"user={user_id}, group={group_id}: {e}"
+            )
+
 
 # Helpers
 
