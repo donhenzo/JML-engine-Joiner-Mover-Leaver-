@@ -119,6 +119,10 @@ def run_mover_csv_mode(args) -> int:
     records to run_mover_pipeline(). JOINER and LEAVER records in the
     same file are skipped with a warning — use the Joiner CSV path for those.
 
+    The EventId is generated internally by run_mover_pipeline() from
+    the payload fields. This function does not generate or pass an
+    event_id — the pipeline owns that responsibility.
+
     Returns exit code: 0 for clean run, 1 if any records failed or were held.
     """
     from Ingestion.csv_parser import parse_csv
@@ -126,7 +130,6 @@ def run_mover_csv_mode(args) -> int:
     from Normalization.lookup_loader import load_lookup_table
     from Normalization.normalizer import Normalizer
     from Provisioning.graph_client import build_graph_client, JmlGraphClient
-    from Functions.Event_store.event_store import generate_event_id
     from Functions.mover_http import run_mover_pipeline
     from azure.data.tables import TableServiceClient
 
@@ -214,30 +217,27 @@ def run_mover_csv_mode(args) -> int:
 
         normalised_payload = norm_result.payload
 
-        # Generate deterministic event ID
-        event_id = generate_event_id(
-            normalised_payload.employee_id,
-            normalised_payload.action.value,
-            normalised_payload.start_date.isoformat(),
-        )
-
         print(f"  ▸ Processing: {normalised_payload.employee_id} "
               f"({normalised_payload.upn})")
         print(f"    Move: {normalised_payload.department} / "
               f"{normalised_payload.job_title}")
-        print(f"    EventId: {event_id}")
 
-        # Run the Mover pipeline
+        # Run the Mover pipeline.
+        # EventId is generated internally — do not pass it from here.
         try:
             result = run_mover_pipeline(
                 payload      = normalised_payload,
-                event_id     = event_id,
                 table_client = table_client,
                 graph_client = graph_client,
             )
 
-            status = result.get("final_status", "UNKNOWN")
+            status  = result.get("final_status", "UNKNOWN")
             summary = result.get("summary", "")
+
+            # Log the EventId that the pipeline assigned, for traceability
+            event_id = result.get("event_id", "")
+            if event_id:
+                print(f"    EventId: {event_id}")
 
             if status == "MOVE_SUCCESS":
                 print(f"    ✓ {status}")
@@ -291,10 +291,10 @@ def run_api_mode(args) -> int:
         return 1
 
     ctx = PipelineContext(
-        graph_client     = graph_client,
-        connection_string= conn_str,
-        output_dir       = args.output,
-        correlation_id   = "api-run",
+        graph_client      = graph_client,
+        connection_string = conn_str,
+        output_dir        = args.output,
+        correlation_id    = "api-run",
     )
 
     if args.mode == "delta":

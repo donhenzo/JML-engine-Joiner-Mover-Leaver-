@@ -61,7 +61,6 @@ from Validation.validation_gate import pre_provision_validate, post_provision_va
 from Provisioning.provisioner import provision_joiner
 from Provisioning.graph_client import JmlGraphClient
 from Functions.mover_http import run_mover_pipeline
-from Functions.Event_store.event_store import generate_event_id
 from azure.data.tables import TableServiceClient
 
 logger = logging.getLogger(__name__)
@@ -224,8 +223,8 @@ def run_single_record(mapped: dict, ctx: PipelineContext) -> bool:
     #
     # Mover records go to run_mover_pipeline — the full 10-step Mover flow.
     # Joiner records continue through the existing provisioning path below.
-    # Leaver is not yet implemented — falls through to the Joiner path
-    # and will be caught by the validation gate.
+    # Leaver is not yet implemented — will be added as a third branch
+    # alongside the existing Joiner and Mover branches.
 
     if normalised_payload.action == JmlAction.MOVER:
         return _run_mover_record(normalised_payload, ctx)
@@ -240,23 +239,18 @@ def _run_mover_record(
     """
     Route a Mover record to run_mover_pipeline.
 
-    Generates the deterministic event ID and builds the TableServiceClient
-    from the stored connection string. Returns True on MOVE_SUCCESS,
-    False on any other status.
-    """
-    event_id = generate_event_id(
-        payload.employee_id,
-        payload.action.value,
-        payload.start_date.isoformat(),
-    )
+    Builds the TableServiceClient from the stored connection string and
+    delegates to run_mover_pipeline(). The EventId is generated inside
+    the pipeline — not here. The ingestion layer does not own event IDs.
 
+    Returns True on MOVE_SUCCESS, False on any other status.
+    """
     table_client = TableServiceClient.from_connection_string(
         ctx.connection_string
     )
 
     result = run_mover_pipeline(
         payload      = payload,
-        event_id     = event_id,
         table_client = table_client,
         graph_client = ctx.graph_client,
     )
@@ -282,7 +276,7 @@ def _run_joiner_record(
     This is the original run_single_record() logic from Step 3 onwards,
     extracted into its own function so the Mover routing branch is clean.
     """
-    employee_id = normalised_payload.employee_id
+    employee_id  = normalised_payload.employee_id
     event_id_str = ""
 
     # Step 3 — Claim event (idempotency guard)
@@ -486,6 +480,7 @@ def _run_joiner_record(
         employee_id, normalised_payload.upn, normalised_payload.action.value,
     )
     return True
+
 
 def mapping_rules_from_ctx(ctx: PipelineContext):
     """Return the mapping rules from the context."""

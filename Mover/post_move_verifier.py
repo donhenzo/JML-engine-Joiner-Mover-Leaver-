@@ -22,6 +22,15 @@ Graph API eventual consistency:
     Group membership writes can take seconds to propagate. A configurable
     delay is applied before fetching. The orchestrator passes delay_seconds
     in so tests can set it to zero without mocking time.
+
+    Removal propagation lag:
+    A group that was successfully removed at Step 6 may still appear in
+    memberOf during the post-move fetch due to Graph eventual consistency.
+    The orchestrator passes remove_confirmed so the verifier can exclude
+    recently removed groups from the UNEXPECTED check. A group the engine
+    just removed appearing in memberOf is a transient propagation state,
+    not a real discrepancy. If it persists, the nightly FullScan will
+    surface it as a hygiene finding.
 """
 
 from __future__ import annotations
@@ -39,7 +48,6 @@ logger = logging.getLogger(__name__)
 # Default delay before re-fetching group membership after writes.
 # Accounts for Graph API eventual consistency.
 DEFAULT_CONSISTENCY_DELAY_SECONDS = 10
-
 
 
 # Data models
@@ -102,7 +110,6 @@ class PostMoveVerificationResult:
     error:             str = ""
 
 
-
 # Graph fetch
 
 def _fetch_actual_groups(
@@ -114,9 +121,6 @@ def _fetch_actual_groups(
 
     Returns a frozenset of group object IDs.
     Raises GraphClientError on failure — caller handles it.
-
-    Uses the SDK memberOf endpoint. Returns only security groups
-    the user is a direct member of.
     """
     try:
         members = graph_client._run(
@@ -143,27 +147,34 @@ def _fetch_actual_groups(
         )
 
 
-
 # Discrepancy calculation
+
 def _calculate_discrepancies(
     expected:         frozenset[str],
     actual:           frozenset[str],
     unmanaged_groups: frozenset[str] = frozenset(),
+    recently_removed: frozenset[str] = frozenset(),
 ) -> list[MembershipDiscrepancy]:
     """
-    Compare expected and actual group sets and return discrepancies. 
-             expected is the set of groups the user should have after the move.
-             actual is the set of groups the user actually has after the move.
-             unmanaged_groups is the set of groups intentionally outside 
-             the engine's scope — their presence in actual is expected and not a discrepancy.
-
+    Compare expected and actual group sets and return discrepancies.
 
     MISSING    — in expected but not in actual. A group the move should
                  have added or retained was not found in the tenant.
-    UNEXPECTED — in actual but not in expected, and not in unmanaged_groups.
-                 Unmanaged groups are excluded — they are intentionally
-                 outside the engine's scope and their presence is expected.
-                 They are recorded separately in the audit record.
+
+    UNEXPECTED — in actual but not in expected, and not excluded by
+                 unmanaged_groups or recently_removed.
+
+    Exclusions from the UNEXPECTED check:
+        unmanaged_groups — groups intentionally outside the engine's
+                           managed catalogue. Their presence in actual
+                           is expected and not a discrepancy. They are
+                           recorded separately in the audit record.
+        recently_removed — groups that were successfully removed at
+                           Step 6 but may still appear in memberOf due
+                           to Graph API eventual consistency lag. A 204
+                           from the DELETE confirms the removal executed.
+                           If the group persists beyond the consistency
+                           window, the nightly FullScan will surface it.
     """
     discrepancies: list[MembershipDiscrepancy] = []
 
@@ -173,7 +184,8 @@ def _calculate_discrepancies(
             kind     = "MISSING",
         ))
 
-    for group_id in (actual - expected) - unmanaged_groups:
+    excluded = unmanaged_groups | recently_removed
+    for group_id in (actual - expected) - excluded:
         discrepancies.append(MembershipDiscrepancy(
             group_id = group_id,
             kind     = "UNEXPECTED",
@@ -182,8 +194,8 @@ def _calculate_discrepancies(
     return discrepancies
 
 
-
 # Main verifier
+
 def verify_post_move_state(
     graph_client:     JmlGraphClient,
     user_id:          str,
@@ -192,6 +204,7 @@ def verify_post_move_state(
     retain_set:       frozenset[str],
     groups_to_add:    frozenset[str],
     unmanaged_groups: frozenset[str] = frozenset(),
+    recently_removed: frozenset[str] = frozenset(),
     delay_seconds:    int = DEFAULT_CONSISTENCY_DELAY_SECONDS,
 ) -> PostMoveVerificationResult:
     """
@@ -208,18 +221,25 @@ def verify_post_move_state(
     VERIFICATION_ERROR.
 
     Args:
-        graph_client:  Authenticated JmlGraphClient instance.
-        user_id:       Entra object ID of the moved user.
-        employee_id:   HR source identifier — used for log context only.
-        unchanged:     Groups the user held that are still valid post-move.
-                       From MoverDelta.unchanged.
-        retain_set:    Groups that survived retention evaluation.
-                       From RetentionResult.retain_set.
-        groups_to_add: Groups added by the new role mapping.
-                       From MoverDelta.groups_to_add.
-        delay_seconds: Seconds to wait before fetching actual state.
-                       Accounts for Graph eventual consistency.
-                       Pass 0 in tests.
+        graph_client:     Authenticated JmlGraphClient instance.
+        user_id:          Entra object ID of the moved user.
+        employee_id:      HR source identifier — used for log context only.
+        unchanged:        Groups the user held that are still valid post-move.
+                          From MoverDelta.unchanged.
+        retain_set:       Groups that survived retention evaluation.
+                          From RetentionResult.retain_set.
+        groups_to_add:    Groups added by the new role mapping.
+                          From MoverDelta.groups_to_add.
+        unmanaged_groups: Groups outside the managed catalogue — excluded
+                          from the UNEXPECTED discrepancy check.
+                          From MoverDelta.unmanaged.
+        recently_removed: Groups successfully removed at Step 6 —
+                          excluded from the UNEXPECTED check to avoid
+                          false positives from Graph propagation lag.
+                          From RetentionResult.remove_confirmed.
+        delay_seconds:    Seconds to wait before fetching actual state.
+                          Accounts for Graph eventual consistency.
+                          Pass 0 in tests.
 
     Returns:
         PostMoveVerificationResult with status, discrepancies, and
@@ -232,7 +252,6 @@ def verify_post_move_state(
     """
     expected_groups: frozenset[str] = unchanged | retain_set | groups_to_add
 
-    # Wait for Graph eventual consistency before fetching
     if delay_seconds > 0:
         logger.info(
             "Post-move verification — waiting %ds for Graph consistency — "
@@ -264,9 +283,10 @@ def verify_post_move_state(
 
     # Step 2 — calculate discrepancies
     discrepancies = _calculate_discrepancies(
-        expected = expected_groups,
-        actual   = actual_groups,
+        expected         = expected_groups,
+        actual           = actual_groups,
         unmanaged_groups = unmanaged_groups,
+        recently_removed = recently_removed,
     )
 
     if discrepancies:
@@ -302,9 +322,8 @@ def verify_post_move_state(
             governance_result.failure_summary(),
         )
 
-    # Resolve final status
-    has_discrepancies      = len(discrepancies) > 0
-    governance_failed      = not governance_result.passed
+    has_discrepancies = len(discrepancies) > 0
+    governance_failed = not governance_result.passed
 
     if has_discrepancies or governance_failed:
         status = PostMoveStatus.MOVE_PARTIAL

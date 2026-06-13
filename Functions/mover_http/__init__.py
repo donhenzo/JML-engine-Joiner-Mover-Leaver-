@@ -3,24 +3,38 @@ Functions/mover_http/__init__.py
 
 Azure Function HTTP trigger for the Mover module.
 
-Orchestrates the 10-step Mover processing flow for a single identity
-lifecycle transition event. Called directly via HTTP or by the BambooHR
-ingestion coordinator when action derivation returns JmlAction.MOVER.
+Orchestrates the Mover processing flow for a single identity lifecycle
+transition event. Called directly via HTTP or by the BambooHR ingestion
+coordinator when action derivation returns JmlAction.MOVER.
 
-10-Step Flow:
-    Step 1  — Fetch current Entra state + concurrent event check
-    Step 2  — Calculate target state from new role mapping
-    Step 3  — Delta analysis (group delta + attribute delta)
-    Step 4  — Retention evaluation
-    Step 5  — SoD re-evaluation (fail closed on block)
-    Step 6  — Execute access removals
-    Step 7  — Execute access additions
-    Step 8  — PIM adjustment (if delta includes PIM groups)
-    Step 9  — Post-move verification
-    Step 10 — Write MoverAuditRecord
+Processing flow:
+
+    Pre-Step  — claim_event() in JmlEvents. Atomic insert — duplicate
+                event ID exits immediately with no side effects.
+
+    Step 1    — Concurrent event check via MoverEventLog. User and
+                memberOf fetch via Graph. acquire_lock() written to
+                JmlEvents on success.
+
+    Step 2    — Entitlement resolution for new and old roles.
+    Step 3    — Group delta (four sets) and attribute delta.
+    Step 4    — Retention evaluation against RetentionRegistry.
+
+    Step 5    — SoD re-evaluation (fail closed). Pass A: unchanged ∪
+                retain_set ∪ groups_to_add ∪ remove_confirmed. Pass B:
+                groups_to_add in isolation. Block → HOLD_FOR_REVIEW →
+                release_lock() → JmlEvents Failed → stop.
+
+    Step 6    — Access removals. Failure → release_lock() → stop.
+    Step 7    — Access additions and attribute patch.
+    Step 8    — PIM adjustment from entitlement delta, not group delta.
+    Step 9    — Post-move membership verification and governance check.
+    Step 10   — MoverAuditRecord written. release_lock(). JmlEvents
+                updated to Completed or Failed.
 
 Every step that fails routes to a defined terminal state.
-No step is skipped. No access change happens without passing Step 5.
+No access change executes without passing Step 5.
+The JmlEvents lock is released on every exit path.
 """
 
 from __future__ import annotations
@@ -50,9 +64,17 @@ from Mover.post_move_verifier import (
     verify_post_move_state,
     PostMoveStatus,
 )
+from Functions.Event_store.event_store import (
+    get_events_table_client,
+    generate_event_id,
+    claim_event,
+    acquire_lock,
+    release_lock,
+    update_event_status,
+    EventStatus,
+)
 
 logger = logging.getLogger(__name__)
-
 
 
 # Table names and constants
@@ -72,7 +94,6 @@ class MoverEventStatus:
     MOVE_FAILED       = "MOVE_FAILED"
     HOLD_FOR_REVIEW   = "HOLD_FOR_REVIEW"
     QUEUED_CONCURRENT = "QUEUED_CONCURRENT"
-
 
 
 # Table Storage helpers
@@ -167,6 +188,7 @@ def _write_audit_record(
             employee_id, event_id, str(e),
         )
 
+
 def _write_hold_queue(
     table_client: TableServiceClient,
     employee_id:  str,
@@ -193,10 +215,10 @@ def _write_hold_queue(
             "violation_count": len(violations),
             "violations":      json.dumps([
                 {
-                    "policy_id":         v.policy_id,
-                    "policy_name":       v.policy_name,
+                    "policy_id":          v.policy_id,
+                    "policy_name":        v.policy_name,
                     "conflicting_groups": v.conflicting_groups,
-                    "risk_rating":       v.risk_rating.value,
+                    "risk_rating":        v.risk_rating.value,
                 }
                 for v in violations
             ]),
@@ -218,13 +240,11 @@ def _write_hold_queue(
         )
 
 
-
-
 # PIM delta extraction
 def _extract_pim_delta(
-    old_pim_groups:  list,
-    new_pim_groups:  list,
-    groups_to_add:   frozenset[str],
+    old_pim_groups:   list,
+    new_pim_groups:   list,
+    groups_to_add:    frozenset[str],
     groups_to_remove: frozenset[str],
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """
@@ -233,15 +253,13 @@ def _extract_pim_delta(
     Works directly from EntitlementResult.pim_groups — the resolver has
     already extracted and deduplicated PIM entries from the rules file.
 
-    Args:
-        old_pim_groups:  PimGroup list from the old role EntitlementResult.
-        new_pim_groups:  PimGroup list from the new role EntitlementResult.
-        groups_to_add:   Group IDs being added in this Mover event.
-        groups_to_remove: Group IDs being removed in this Mover event.
+    PIM eligibility assignments are schedule objects — they never appear
+    in memberOf and never cross the group delta boundary. The delta is
+    derived purely from old vs new resolved entitlements.
 
     Returns:
-        pim_to_add:    PIM groups in new but not old, present in groups_to_add.
-        pim_to_remove: PIM groups in old but not new, present in groups_to_remove.
+        pim_to_add:    PIM groups in new but not old.
+        pim_to_remove: PIM groups in old but not new.
         pim_to_change: PIM groups present in both old and new (scope change).
     """
     def _to_dict(pg) -> dict:
@@ -258,22 +276,9 @@ def _extract_pim_delta(
     old_ids = frozenset(old_pim_map.keys())
     new_ids = frozenset(new_pim_map.keys())
 
-    # PIM eligibility assignments are schedule objects — they never appear
-    # in memberOf and never cross the group delta boundary.
-    # Trigger is based purely on old vs new resolved entitlements.
-    pim_to_add = [
-        _to_dict(new_pim_map[gid])
-        for gid in (new_ids - old_ids)
-    ]
-
-    pim_to_remove = [
-        _to_dict(old_pim_map[gid])
-        for gid in (old_ids - new_ids)
-    ]
-    pim_to_change = [
-        _to_dict(new_pim_map[gid])
-        for gid in (old_ids & new_ids)
-    ]
+    pim_to_add    = [_to_dict(new_pim_map[gid]) for gid in (new_ids - old_ids)]
+    pim_to_remove = [_to_dict(old_pim_map[gid]) for gid in (old_ids - new_ids)]
+    pim_to_change = [_to_dict(new_pim_map[gid]) for gid in (old_ids & new_ids)]
 
     return pim_to_add, pim_to_remove, pim_to_change
 
@@ -286,9 +291,9 @@ def _resolve_manager_id(
     """
     Resolve a manager employee number to an Entra object ID.
 
-    Returns the Entra object ID if found, None if not provided or
-    not found. A missing manager is not fatal for a Mover event —
-    it is recorded in the audit trail as a warning.
+    Returns the Entra object ID if found, None if not provided or not
+    found. A missing manager is not fatal for a Mover event — it is
+    recorded in the audit trail as a warning.
     """
     if not manager_id:
         return None
@@ -302,7 +307,6 @@ def _resolve_manager_id(
             manager_id, str(e),
         )
         return None
-
 
 
 # Group membership execution
@@ -430,7 +434,6 @@ def _execute_additions(
     return actions_taken
 
 
-
 # Attribute update
 def _execute_attribute_update(
     graph_client: JmlGraphClient,
@@ -494,18 +497,21 @@ def _execute_attribute_update(
 # Main orchestrator
 def run_mover_pipeline(
     payload:      IdentityPayload,
-    event_id:     str,
     table_client: TableServiceClient,
     graph_client: JmlGraphClient,
 ) -> dict:
     """
     Execute the 10-step Mover processing flow for a single identity event.
 
+    The EventId is generated internally from the payload. Callers pass
+    only the payload and clients — no external event ID is accepted.
+    This mirrors the Joiner pattern and keeps event ownership inside
+    the pipeline, not in the ingestion layer.
+
     Args:
         payload:      Canonical IdentityPayload with action=MOVER.
                       Department, job_title, and employment_type reflect
                       the NEW role — the state the user is moving TO.
-        event_id:     SHA-256 deterministic event ID from event_store.py.
         table_client: Authenticated TableServiceClient for all Table Storage ops.
         graph_client: Authenticated JmlGraphClient for all Graph API ops.
 
@@ -518,7 +524,17 @@ def run_mover_pipeline(
         Graph API calls at Steps 1, 6, 7, 8, and 9.
         PowerShell validation engine call at Step 9.
     """
-    employee_id   = payload.employee_id
+    employee_id = payload.employee_id
+
+    # EventId is owned by the pipeline, not by the caller.
+    # The same deterministic hash is produced regardless of which path
+    # (CSV, API, HTTP trigger) invokes this function.
+    event_id = generate_event_id(
+        employee_id,
+        "Mover",
+        payload.start_date.isoformat(),
+    )
+
     audit_record: dict = {
         "event_type":       "MOVE",
         "employee_id":      employee_id,
@@ -530,9 +546,45 @@ def run_mover_pipeline(
         "post_move_status": MoverEventStatus.RECEIVED,
     }
 
+    # Pre-Step — Claim event in JmlEvents.
+    # JmlEvents is the engine-wide event store shared across Joiner,
+    # Mover, and Leaver. claim_event() attempts an atomic insert.
+    # If the row already exists (retry, duplicate trigger, concurrent
+    # invocation), it returns False and the pipeline exits immediately
+    # with no side effects.
+    conn_str          = os.environ.get("JML_STORAGE_CONNECTION_STRING", "")
+    jml_events_client = get_events_table_client(conn_str)
+
+    payload_json_str = json.dumps({
+        "employee_id": employee_id,
+        "action":      "Mover",
+        "event_id":    event_id,
+    })
+
+    claimed = claim_event(
+        table_client   = jml_events_client,
+        employee_id    = employee_id,
+        action         = "Mover",
+        start_date     = payload.start_date.isoformat(),
+        payload_json   = payload_json_str,
+        correlation_id = event_id,
+    )
+
+    if not claimed:
+        logger.info(
+            "Mover event already claimed in JmlEvents — idempotency exit — "
+            "employee=%s", employee_id,
+        )
+        return {
+            "final_status": MoverEventStatus.QUEUED_CONCURRENT,
+            "employee_id":  employee_id,
+            "event_id":     event_id,
+            "summary":      "Duplicate event — already claimed in JmlEvents.",
+        }
+
 
     # Step 1 — Current state discovery + concurrent event check
- 
+
     logger.info(
         "Mover Step 1 — current state discovery — employee=%s", employee_id
     )
@@ -601,6 +653,19 @@ def run_mover_pipeline(
         )
         return _fail(employee_id, event_id, f"memberOf fetch failed: {str(e)}")
 
+    # Acquire processing lock in JmlEvents.
+    # This is the hard atomic concurrency guard. Two function instances
+    # cannot both hold the lock for the same event_id simultaneously.
+    # The lock expires after STALE_LOCK_MINUTES if the instance crashes.
+    import uuid as _uuid
+    instance_id = str(_uuid.uuid4())
+    acquire_lock(
+        table_client = jml_events_client,
+        employee_id  = employee_id,
+        event_id     = event_id,
+        instance_id  = instance_id,
+    )
+
     # Current attributes for attribute delta
     current_attributes: dict = {
         "department":     current_user.get("department"),
@@ -610,23 +675,23 @@ def run_mover_pipeline(
         "employeeType":   None,
     }
 
- 
+
     # Step 2 — Target state calculation
-  
+
     logger.info(
         "Mover Step 2 — target state calculation — employee=%s", employee_id
     )
 
     try:
-            _rules_path = os.path.join(
-                os.path.dirname(__file__), "..", "..", "config", "role_mapping_rules.json"
-            )
-            mapping_rules = load_mapping_rules(rules_path=_rules_path)
+        _rules_path = os.path.join(
+            os.path.dirname(__file__), "..", "..", "config", "role_mapping_rules.json"
+        )
+        mapping_rules = load_mapping_rules(rules_path=_rules_path)
     except Exception as e:
-            _write_event_log(
-                table_client, employee_id, event_id, MoverEventStatus.MOVE_FAILED
-            )
-            return _fail(employee_id, event_id, f"Mapping rules load failed: {str(e)}")
+        _write_event_log(
+            table_client, employee_id, event_id, MoverEventStatus.MOVE_FAILED
+        )
+        return _fail(employee_id, event_id, f"Mapping rules load failed: {str(e)}")
 
     try:
         _sod_path = os.path.join(
@@ -669,11 +734,11 @@ def run_mover_pipeline(
     resolved_manager_id = _resolve_manager_id(graph_client, payload.manager_id)
 
     incoming_attributes: dict = {
-        "department":     payload.department,
-        "jobTitle":       payload.job_title,
-        "manager":        resolved_manager_id,
-        "employeeType":   payload.employment_type.value,
-        "usageLocation":  payload.location,
+        "department":    payload.department,
+        "jobTitle":      payload.job_title,
+        "manager":       resolved_manager_id,
+        "employeeType":  payload.employment_type.value,
+        "usageLocation": payload.location,
     }
 
 
@@ -712,6 +777,7 @@ def run_mover_pipeline(
 
 
     # Step 4 — Retention evaluation
+
     logger.info(
         "Mover Step 4 — retention evaluation — employee=%s", employee_id
     )
@@ -734,8 +800,9 @@ def run_mover_pipeline(
         if d.outcome.value == "RETAINED"
     ]
 
-  
+
     # Step 5 — SoD re-evaluation
+
     logger.info(
         "Mover Step 5 — SoD re-evaluation — employee=%s", employee_id
     )
@@ -750,15 +817,14 @@ def run_mover_pipeline(
 
     audit_record["sod_escalations"] = [
         {
-            "rule":              v.policy_id,
+            "rule":               v.policy_id,
             "conflicting_groups": v.conflicting_groups,
-            "resolution":        "HOLD",
+            "resolution":         "HOLD",
         }
         for v in sod_result.pass_a.result.violations
         if v.action.value == "Block" and not v.exception_applied
     ]
 
-    
     if sod_result.should_hold:
         logger.warning(
             "SoD block — event entering HOLD_FOR_REVIEW — employee=%s",
@@ -769,15 +835,29 @@ def run_mover_pipeline(
             table_client, employee_id, event_id,
             MoverEventStatus.HOLD_FOR_REVIEW
         )
+        _write_hold_queue(
+            table_client, employee_id, event_id,
+            sod_result.pass_a.result.violations,
+        )
         _write_audit_record(table_client, employee_id, event_id, audit_record)
+        release_lock(jml_events_client, employee_id, event_id)
+        update_event_status(
+            table_client = jml_events_client,
+            employee_id  = employee_id,
+            event_id     = event_id,
+            status       = EventStatus.FAILED,
+            failure_step = "SoDBlock",
+        )
         return {
             "final_status": MoverEventStatus.HOLD_FOR_REVIEW,
             "employee_id":  employee_id,
             "event_id":     event_id,
             "summary":      "SoD conflict detected. Event held for human review.",
         }
-  
+
+
     # Step 6 — Execute access removals
+
     logger.info(
         "Mover Step 6 — access removals — employee=%s", employee_id
     )
@@ -805,13 +885,22 @@ def run_mover_pipeline(
             table_client, employee_id, event_id, MoverEventStatus.MOVE_FAILED
         )
         _write_audit_record(table_client, employee_id, event_id, audit_record)
+        release_lock(jml_events_client, employee_id, event_id)
+        update_event_status(
+            table_client = jml_events_client,
+            employee_id  = employee_id,
+            event_id     = event_id,
+            status       = EventStatus.FAILED,
+            failure_step = "AccessRemoval",
+        )
         return _fail(
             employee_id, event_id,
             "Access removal failed — additions not attempted.",
         )
 
-   
+
     # Step 7 — Execute access additions + attribute update
+
     logger.info(
         "Mover Step 7 — access additions — employee=%s", employee_id
     )
@@ -838,8 +927,9 @@ def run_mover_pipeline(
             f"Attribute update failed: {attr_error}"
         )
 
-    
+
     # Step 8 — PIM adjustment
+
     logger.info(
         "Mover Step 8 — PIM adjustment check — employee=%s", employee_id
     )
@@ -894,6 +984,7 @@ def run_mover_pipeline(
         )
         audit_record["pim_changes"] = None
 
+
     # Step 9 — Post-move verification
 
     logger.info(
@@ -908,15 +999,16 @@ def run_mover_pipeline(
         retain_set       = retention_result.retain_set,
         groups_to_add    = delta.groups_to_add,
         unmanaged_groups = delta.unmanaged,
+        recently_removed = retention_result.remove_confirmed,
     )
 
     audit_record["post_move_verification"] = {
-        "status":             verification.status.value,
-        "discrepancies":      [
+        "status":              verification.status.value,
+        "discrepancies":       [
             {"group_id": d.group_id, "kind": d.kind}
             for d in verification.discrepancies
         ],
-        "governance_passed":  (
+        "governance_passed":   (
             verification.governance_result.passed
             if verification.governance_result else False
         ),
@@ -944,6 +1036,24 @@ def run_mover_pipeline(
     _write_event_log(table_client, employee_id, event_id, final_status)
     _write_audit_record(table_client, employee_id, event_id, audit_record)
 
+    jml_final_status = (
+        EventStatus.COMPLETED
+        if final_status == MoverEventStatus.MOVE_SUCCESS
+        else EventStatus.FAILED
+    )
+    release_lock(jml_events_client, employee_id, event_id)
+    update_event_status(
+        table_client = jml_events_client,
+        employee_id  = employee_id,
+        event_id     = event_id,
+        status       = jml_final_status,
+        failure_step = (
+            "PostMoveVerification"
+            if final_status == MoverEventStatus.MOVE_PARTIAL
+            else ""
+        ),
+    )
+
     logger.info(
         "Mover pipeline complete — employee=%s, status=%s",
         employee_id, final_status,
@@ -957,9 +1067,7 @@ def run_mover_pipeline(
     }
 
 
-
 # Helpers
-
 
 def _fail(employee_id: str, event_id: str, reason: str) -> dict:
     """Return a standard failure response dict."""
@@ -971,16 +1079,15 @@ def _fail(employee_id: str, event_id: str, reason: str) -> dict:
     }
 
 
-
 # Azure Function HTTP entry point
 
 def main(req) -> object:
     """
     Azure Function HTTP trigger entry point.
 
-    Expects a JSON body with a canonical IdentityPayload and event_id.
-    Builds clients from environment variables, then delegates to
-    run_mover_pipeline().
+    Expects a JSON body with a canonical IdentityPayload.
+    event_id is no longer accepted from the caller — it is generated
+    internally by run_mover_pipeline() from the payload fields.
 
     Environment variables required:
         AZURE_STORAGE_CONNECTION_STRING
@@ -992,9 +1099,8 @@ def main(req) -> object:
     import azure.functions as func
 
     try:
-        body     = req.get_json()
-        event_id = body.get("event_id", "")
-        payload  = IdentityPayload(**body["payload"])
+        body    = req.get_json()
+        payload = IdentityPayload(**body["payload"])
 
         conn_str     = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
         table_client = _get_table_client(conn_str)
@@ -1004,7 +1110,6 @@ def main(req) -> object:
 
         result = run_mover_pipeline(
             payload      = payload,
-            event_id     = event_id,
             table_client = table_client,
             graph_client = graph_client,
         )

@@ -49,7 +49,8 @@
     "accountant": "Accountant",
     "director of it": "Director of IT",
     "it director": "Director of IT",
-    "finance controller": "Finance Controller"
+    "finance controller": "Finance Controller",
+    "payment processor": "Payment Processor"
   },
  "employment_type": {
     "employee": "Employee",

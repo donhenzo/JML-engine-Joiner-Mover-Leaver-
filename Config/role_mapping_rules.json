@@ -170,6 +170,22 @@
       }
     },
     {
+  "id": "RULE-FIN-PAYMENT-PROCESSOR",
+  "description": "Finance — Payment Processor role. Gets Finance staff group and Payment Processors duty group. SoD duty group: SG_Finance_PaymentProcessors (02d7e0dd). SOD-001 blocks if this identity also receives SG_Finance_PaymentApprovers (8ba2677b). SOD-003 warns if this identity also receives SG_Finance_Auditors (c3b520b3).",
+  "priority": 200,
+  "conditions": {
+    "department": { "operator": "exact", "value": "Finance" },
+    "job_title":  { "operator": "exact", "value": "Payment Processor" }
+  },
+  "entitlements": {
+    "groups": [
+      "885938dd-cd20-4a69-9f7d-9353393aac31",
+      "02d7e0dd-df9a-4b9f-aa97-492d8bccd480"
+    ],
+    "rbac_roles": []
+  }
+},
+    {
       "id": "RULE-FINANCE-HOD",
       "description": "Head of Finance — finance base, Finance manager group, cross-department manager flag, M365 E5, Finance Addon, CA Privileged, PIM eligible for Global Reader. SoD duty groups: SG_Finance_PaymentApprovers (8ba2677b) and SG_Finance_Auditors (c3b520b3). SOD-004 warns on every HOF provisioning — PaymentApprovers + Auditors is intentional for this role.",
       "priority": 200,
