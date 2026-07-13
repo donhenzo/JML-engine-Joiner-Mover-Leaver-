@@ -2,7 +2,7 @@
 
 Governance-first Joiner, Mover, and Leaver automation for Microsoft Entra ID.
 
-Most provisioning systems create identities first and validate access afterwards. I built this engine to reverse that model. Governance validation, policy evaluation, and Separation of Duties (SoD) checks run before any Microsoft Graph operation. If a request fails policy, no identity is created and no access is modified. Every decision is recorded in an audit report.
+Most provisioning systems create identities first and validate access afterwards. I built this engine to reverse that model. Governance validation, policy evaluation, and Separation of Duties (SoD) checks run before any Microsoft Graph operation. If a request fails policy, no identity is created and no access is modified. Every decision is recorded in an immutable audit report.
 
 > **Key idea:** Governance should decide whether provisioning happens, not verify it afterwards. I resolve entitlements, validate policy, and evaluate Separation of Duties before any identity or access change is written to Microsoft Entra ID.
 
@@ -10,7 +10,33 @@ Most provisioning systems create identities first and validate access afterwards
 
 ## Architecture Overview
 
-![Architecture overview](docs/architecture-overview.svg)
+```mermaid
+flowchart TD
+    HR["HR Source<br/>BambooHR · CSV"]
+
+    subgraph GOV["BEFORE ANY MICROSOFT GRAPH WRITE"]
+        CI["Canonical Identity<br/>normalize raw HR fields"]
+        ER["Entitlement Resolution<br/>Joiner: resolve · Mover: delta"]
+        SOD["Separation of Duties<br/>block → hold · warn → continue"]
+        GV["Governance Validation<br/>33 rules · zero Graph calls"]
+        CI --> ER --> SOD --> GV
+    end
+
+    HR --> CI
+    GV --> MG["Microsoft Graph<br/>create or modify identity"]
+    MG --> PV["Post-Provision Validation<br/>confirm actual tenant state"]
+    PV --> AR["Audit Report<br/>immutable · one per event"]
+
+    SOD -.block.-> HOLD["Hold Queue"]
+    GV -.fail.-> HOLD
+    HOLD -.-> AR
+
+    style MG fill:#16244A,color:#ffffff
+    style HOLD fill:#F5E6C8,color:#16244A
+    style GOV fill:#F1F6FD,stroke:#B9CEEC
+```
+
+Nothing reaches Microsoft Graph until policy evaluation, Separation of Duties, and governance validation have all passed. A failure at any gate holds the record and writes an audit report. No identity is created and no access is changed.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design.
 
